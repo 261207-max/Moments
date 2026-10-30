@@ -1,6 +1,6 @@
 # Moments
 
-DM 중심의 소셜 앱 프로토타입입니다. Express, Socket.IO, SQLite로 계정과 게시물, 대화를 저장합니다.
+DM 중심의 소셜 앱 프로토타입입니다. Express, Socket.IO, SQLite로 계정과 게시물, 24시간 스토리, 1:1 및 그룹 대화를 저장합니다.
 
 ## 실행
 
@@ -28,7 +28,24 @@ npm start
 PORT=3000
 PUBLIC_BASE_URL=http://localhost:3000
 GOOGLE_CLIENT_ID=YOUR_GOOGLE_CLIENT_ID
+YOUTUBE_API_KEY=YOUR_YOUTUBE_DATA_API_KEY
 ```
+
+## 자동 YouTube Shorts 추천
+
+자동 추천을 사용하려면 Google Cloud Console에서 YouTube Data API v3를 활성화하고 API 키를 발급해 `.env`의 `YOUTUBE_API_KEY`에 설정합니다. 서버를 다시 시작하면 릴스 피드가 공개 Shorts 검색 결과를 불러옵니다. 키는 서버에서만 사용됩니다.
+
+YouTube는 외부 앱에 개인화된 추천 목록을 제공하지 않습니다. Moments는 공개 `#shorts` 검색 결과를 사용자의 완주·시청·좋아요와 영상 주제로 다시 정렬합니다. API 키가 없어도 직접 추가한 릴스는 계속 볼 수 있습니다.
+
+## 비밀번호 재설정
+
+로그인할 수 없는 계정은 프로젝트 루트에서 아래 명령으로 비밀번호를 재설정할 수 있습니다. 아이디를 입력한 뒤 새 비밀번호는 터미널에 표시되지 않게 입력합니다.
+
+```sh
+npm run reset-password
+```
+
+재설정 후 해당 계정의 기존 로그인 세션은 종료됩니다.
 
 ## 다른 기기에서 테스트
 

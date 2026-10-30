@@ -3,8 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node --env-file-if-exists=.env server.js",
+    "dev": "node --env-file-if-exists=.env --watch server.js",
+    "reset-password": "node --env-file-if-exists=.env reset-password.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

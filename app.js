@@ -1,9 +1,30 @@
 const state = {
   user: null,
   posts: [],
+  stories: [],
+  activeStoryUserId: null,
+  activeStoryIndex: 0,
+  storyRequestToken: 0,
+  storyTimer: null,
+  reels: [],
+  reelSort: "recommended",
+  reelNextPageToken: "",
+  reelDiscoveryConfigured: false,
+  reelDiscoveryError: "",
+  reelLoadingMore: false,
+  reelPlayers: new Map(),
+  reelPlayerLoading: new Set(),
+  reelWatchSessions: new Map(),
+  reelPlayingSince: new Map(),
+  reelWatchTimers: new Map(),
+  reelObserver: null,
+  reelLoadObserver: null,
+  activeReelId: null,
   conversations: [],
   notifications: [],
   messages: new Map(),
+  groupMode: false,
+  selectedGroupUsers: new Map(),
   activeConversationId: null,
   socket: null,
   storyUserId: null,
@@ -12,7 +33,7 @@ const state = {
 
 const app = document.getElementById("app");
 const authScreen = document.getElementById("authScreen");
-const viewIds = ["home", "explore", "notifications", "profile", "settings"];
+const viewIds = ["home", "reels", "explore", "notifications", "profile", "settings"];
 const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character]));
 const initials = name => Array.from(String(name || ""))[0] || "?";
 const formatTime = timestamp => new Intl.DateTimeFormat("ko-KR", { hour: "numeric", minute: "2-digit" }).format(new Date(timestamp));
@@ -106,14 +127,16 @@ function showApp() {
 
 async function loadAppData() {
   try {
-    const [postResult, conversationResult, notificationResult] = await Promise.all([
+    const [postResult, conversationResult, notificationResult, storyResult] = await Promise.all([
       api("/api/posts"),
       api("/api/conversations"),
       api("/api/notifications"),
+      api("/api/stories"),
     ]);
     state.posts = postResult.posts;
     state.conversations = conversationResult.conversations;
     state.notifications = notificationResult.notifications;
+    state.stories = storyResult.stories;
     renderAll();
   } catch (error) {
     if (error.message.includes("로그인")) showAuth();
@@ -157,6 +180,10 @@ function connectSocket() {
 }
 
 function setView(view) {
+  if (view !== "reels") {
+    state.activeReelId = null;
+    state.reelPlayers.forEach(player => player.pauseVideo());
+  }
   app.dataset.view = view === "messages" ? "messages" : view;
   viewIds.forEach(id => {
     document.getElementById(`${id}View`).hidden = id !== view;
@@ -166,18 +193,94 @@ function setView(view) {
   app.classList.toggle("show-chat", view === "messages" && Boolean(state.activeConversationId));
   document.querySelectorAll(".rail-button[data-view]").forEach(button => button.classList.toggle("active", button.dataset.view === view));
   if (view === "messages") renderThreads();
+  if (view === "reels") loadReels();
 }
 
 function renderStories() {
-  const authors = new Map();
-  for (const post of state.posts) {
-    if (!authors.has(post.userId)) authors.set(post.userId, post);
+  const groupedStories = new Map();
+  for (const story of state.stories) {
+    if (!groupedStories.has(story.userId)) groupedStories.set(story.userId, []);
+    groupedStories.get(story.userId).push(story);
   }
-  const stories = [
-    `<button class="story" type="button" data-story="mine" aria-label="내 모먼츠 작성"><span class="story-ring"><span>${escapeHtml(initials(state.user.displayName))}</span></span><span class="story-name">내 모먼츠</span></button>`,
-    ...[...authors.values()].filter(post => post.userId !== state.user.id).map(post => `<button class="story" type="button" data-story="${escapeHtml(post.userId)}" aria-label="${escapeHtml(post.displayName)}의 모먼츠"><span class="story-ring"><span>${escapeHtml(initials(post.displayName))}</span></span><span class="story-name">${escapeHtml(post.username)}</span></button>`),
-  ];
-  document.getElementById("stories").innerHTML = stories.join("");
+  const ownStories = groupedStories.get(state.user.id) || [];
+  const ownStory = `<div class="story-item"><button class="story story-open" type="button" ${ownStories.length ? `data-story-user="${escapeHtml(state.user.id)}"` : "data-story-add"} aria-label="${ownStories.length ? "내 스토리 보기" : "스토리 추가"}"><span class="story-ring ${ownStories.length && ownStories.every(story => story.viewed) ? "seen" : ""}"><span>${escapeHtml(initials(state.user.displayName))}</span></span><span class="story-name">내 스토리</span></button><button class="story-add-badge" type="button" data-story-add aria-label="스토리 추가" title="스토리 추가">+</button></div>`;
+  const others = [...groupedStories.entries()]
+    .filter(([userId]) => userId !== state.user.id)
+    .map(([userId, stories]) => {
+      const story = stories[0];
+      const seen = stories.every(item => item.viewed);
+      return `<button class="story" type="button" data-story-user="${escapeHtml(userId)}" aria-label="${escapeHtml(story.displayName)}의 스토리 보기"><span class="story-ring ${seen ? "seen" : ""}"><span>${escapeHtml(initials(story.displayName))}</span></span><span class="story-name">${escapeHtml(story.displayName)}</span></button>`;
+    });
+  document.getElementById("stories").innerHTML = [ownStory, ...others].join("");
+}
+
+function renderGroupSelection() {
+  const target = document.getElementById("groupSelectedUsers");
+  target.innerHTML = [...state.selectedGroupUsers.values()].map(user => `<button class="group-selected-chip" type="button" data-group-remove="${escapeHtml(user.id)}" aria-label="${escapeHtml(user.displayName)} 제외">${escapeHtml(user.displayName)} ×</button>`).join("");
+  const createButton = document.getElementById("createGroupButton");
+  createButton.disabled = state.selectedGroupUsers.size < 2 || state.selectedGroupUsers.size > 9;
+  createButton.textContent = `그룹 대화 시작 (${state.selectedGroupUsers.size + 1}명)`;
+}
+
+async function closeStoryViewer() {
+  clearTimeout(state.storyTimer);
+  state.storyRequestToken += 1;
+  state.activeStoryUserId = null;
+  const dialog = document.getElementById("storyViewer");
+  if (dialog.open) dialog.close();
+  document.getElementById("storyViewerImage").removeAttribute("src");
+}
+
+async function stepStory(direction) {
+  const stories = state.stories.filter(story => story.userId === state.activeStoryUserId);
+  const nextIndex = state.activeStoryIndex + direction;
+  if (nextIndex < 0 || nextIndex >= stories.length) return closeStoryViewer();
+  state.activeStoryIndex = nextIndex;
+  await renderStoryViewer();
+}
+
+async function openStoryGroup(userId, index = 0) {
+  const stories = state.stories.filter(story => story.userId === userId);
+  if (!stories.length) return;
+  clearTimeout(state.storyTimer);
+  state.activeStoryUserId = userId;
+  state.activeStoryIndex = index;
+  const dialog = document.getElementById("storyViewer");
+  if (!dialog.open) dialog.showModal();
+  await renderStoryViewer();
+}
+
+async function renderStoryViewer() {
+  const stories = state.stories.filter(story => story.userId === state.activeStoryUserId);
+  const story = stories[state.activeStoryIndex];
+  if (!story) {
+    closeStoryViewer();
+    return;
+  }
+  clearTimeout(state.storyTimer);
+  const requestToken = ++state.storyRequestToken;
+  let result;
+  try {
+    result = await api(`/api/stories/${encodeURIComponent(story.id)}`);
+  } catch (error) {
+    alert(error.message);
+    closeStoryViewer();
+    return;
+  }
+  if (!document.getElementById("storyViewer").open || requestToken !== state.storyRequestToken) return;
+  const profileName = document.getElementById("storyViewerName");
+  profileName.textContent = result.story.displayName;
+  document.getElementById("storyViewerTime").textContent = new Intl.DateTimeFormat("ko-KR", { hour: "numeric", minute: "2-digit" }).format(new Date(story.createdAt));
+  document.getElementById("storyViewerImage").src = result.story.imageData;
+  document.getElementById("storyViewerCaption").textContent = result.story.caption;
+  story.viewed = 1;
+  renderStories();
+  document.getElementById("storyViewerProgress").innerHTML = stories.map((item, index) => `<span class="story-progress-track"><span class="${index < state.activeStoryIndex ? "complete" : index === state.activeStoryIndex ? "current" : ""}"></span></span>`).join("");
+  api(`/api/stories/${encodeURIComponent(story.id)}/view`, { method: "POST" }).catch(() => {});
+  state.storyTimer = setTimeout(() => {
+    state.activeStoryIndex += 1;
+    renderStoryViewer();
+  }, 5000);
 }
 
 function emptyState(title, message) {
@@ -219,6 +322,206 @@ function renderExplore() {
   renderPosts(document.getElementById("explorePosts"), results, "게시물을 검색하거나 첫 순간을 공유해보세요.");
 }
 
+let youtubeApiPromise;
+function ensureYouTubeApi() {
+  if (window.YT?.Player) return Promise.resolve(window.YT);
+  if (!youtubeApiPromise) {
+    youtubeApiPromise = new Promise((resolve, reject) => {
+      const previousCallback = window.onYouTubeIframeAPIReady;
+      window.onYouTubeIframeAPIReady = () => {
+        previousCallback?.();
+        resolve(window.YT);
+      };
+      const script = document.createElement("script");
+      script.src = "https://www.youtube.com/iframe_api";
+      script.async = true;
+      script.onerror = () => reject(new Error("YouTube 플레이어를 불러오지 못했습니다."));
+      document.head.append(script);
+    });
+  }
+  return youtubeApiPromise;
+}
+
+async function loadReels() {
+  await destroyReelPlayers();
+  state.reelNextPageToken = "";
+  state.reelDiscoveryError = "";
+  try {
+    const [manualResult, discoveryResult] = await Promise.all([
+      api(`/api/reels?sort=${state.reelSort}`),
+      api(`/api/reels/recommendations?sort=${state.reelSort}`).catch(error => ({ configured: true, error })),
+    ]);
+    state.reelDiscoveryConfigured = discoveryResult.configured === true;
+    state.reelDiscoveryError = discoveryResult.error?.message || "";
+    state.reelNextPageToken = discoveryResult.nextPageToken || "";
+    const recommended = discoveryResult.videos || [];
+    const recommendedIds = new Set(recommended.map(reel => reel.youtubeId));
+    state.reels = [...recommended, ...manualResult.reels.filter(reel => !recommendedIds.has(reel.youtubeId))];
+    renderReels();
+  } catch (error) {
+    document.getElementById("reelsFeed").innerHTML = emptyState("릴스를 불러오지 못했어요", error.message);
+  }
+}
+
+function renderReels() {
+  const feed = document.getElementById("reelsFeed");
+  destroyReelPlayers();
+  const status = document.getElementById("reelApiStatus");
+  status.textContent = state.reelDiscoveryError || (!state.reelDiscoveryConfigured
+    ? "자동 추천을 사용하려면 서버에 YouTube Data API 키가 필요합니다."
+    : "");
+  document.querySelectorAll("[data-reels-sort]").forEach(button => {
+    button.classList.toggle("active", button.dataset.reelsSort === state.reelSort);
+  });
+  if (!state.reels.length) {
+    feed.innerHTML = emptyState(state.reelDiscoveryConfigured ? "추천 영상을 찾지 못했어요" : "아직 릴스가 없어요", "Shorts 링크를 직접 추가하거나 자동 추천을 설정할 수 있습니다.");
+    return;
+  }
+  feed.innerHTML = `${state.reels.map(renderReel).join("")}<div class="reel-load-sentinel" id="reelLoadSentinel" aria-hidden="true"></div>`;
+  observeReelCards();
+}
+
+function renderReel(reel) {
+  const creator = reel.source === "youtube" ? reel.creatorDisplayName : `@${reel.creatorUsername}`;
+  return `<article class="reel-card" data-reel-card="${escapeHtml(reel.id)}"><div class="reel-player" id="reel-player-${escapeHtml(reel.id)}" data-youtube-id="${escapeHtml(reel.youtubeId)}" aria-label="${escapeHtml(reel.caption)}"></div><div class="reel-shade"></div><div class="reel-copy"><span class="reel-reason">${escapeHtml(reel.recommendationReason)}</span><strong>${escapeHtml(creator)}</strong><p>${escapeHtml(reel.caption)}</p><a href="https://www.youtube.com/shorts/${encodeURIComponent(reel.youtubeId)}" target="_blank" rel="noopener noreferrer">YouTube에서 열기</a></div><div class="reel-actions"><button class="reel-like ${reel.liked ? "liked" : ""}" type="button" data-reel-like="${escapeHtml(reel.id)}" aria-label="좋아요" aria-pressed="${Boolean(reel.liked)}"><svg viewBox="0 0 24 24"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8l1.1 1.1L12 21l7.8-7.5 1.1-1.1a5.5 5.5 0 0 0-.1-7.8z"/></svg><span>${reel.likes}</span></button><span class="reel-signal" title="내 시청 기록">${reel.completed ? "완주" : reel.watchMs ? "시청" : ""}</span></div></article>`;
+}
+
+async function loadMoreReels() {
+  if (state.reelLoadingMore || !state.reelNextPageToken || !state.reelDiscoveryConfigured) return;
+  state.reelLoadingMore = true;
+  try {
+    const result = await api(`/api/reels/recommendations?sort=${state.reelSort}&pageToken=${encodeURIComponent(state.reelNextPageToken)}`);
+    state.reelNextPageToken = result.nextPageToken || "";
+    const existing = new Set(state.reels.map(reel => reel.youtubeId));
+    const added = result.videos.filter(reel => !existing.has(reel.youtubeId));
+    state.reels.push(...added);
+    const sentinel = document.getElementById("reelLoadSentinel");
+    if (sentinel && added.length) {
+      sentinel.insertAdjacentHTML("beforebegin", added.map(renderReel).join(""));
+      added.forEach(reel => {
+        const card = document.querySelector(`[data-reel-card="${CSS.escape(reel.id)}"]`);
+        if (card) state.reelObserver?.observe(card);
+      });
+    }
+    if (!state.reelNextPageToken) sentinel?.remove();
+  } catch (error) {
+    state.reelDiscoveryError = error.message;
+    document.getElementById("reelApiStatus").textContent = error.message;
+    state.reelNextPageToken = "";
+  } finally {
+    state.reelLoadingMore = false;
+  }
+}
+
+async function destroyReelPlayers() {
+  state.reelObserver?.disconnect();
+  state.reelLoadObserver?.disconnect();
+  const pendingSaves = [];
+  state.reelPlayers.forEach((player, reelId) => {
+    if (state.reelPlayingSince.has(reelId)) pendingSaves.push(saveReelWatch(reelId));
+    player.destroy();
+  });
+  state.reelWatchTimers.forEach(timer => clearInterval(timer));
+  state.reelPlayers.clear();
+  state.reelPlayerLoading.clear();
+  state.reelWatchTimers.clear();
+  state.reelWatchSessions.clear();
+  state.reelPlayingSince.clear();
+  await Promise.all(pendingSaves);
+}
+
+function observeReelCards() {
+  state.reelObserver?.disconnect();
+  state.reelLoadObserver?.disconnect();
+  state.reelObserver = new IntersectionObserver(entries => {
+    for (const entry of entries) {
+      const reelId = entry.target.dataset.reelCard;
+      if (entry.isIntersecting && entry.intersectionRatio >= 0.65) {
+        activateReel(reelId);
+      } else if (state.activeReelId === reelId) {
+        state.reelPlayers.get(reelId)?.pauseVideo();
+        state.activeReelId = null;
+      }
+    }
+  }, { root: document.getElementById("reelsFeed"), threshold: [0.65] });
+  document.querySelectorAll("[data-reel-card]").forEach(card => state.reelObserver.observe(card));
+  const sentinel = document.getElementById("reelLoadSentinel");
+  if (sentinel && state.reelNextPageToken) {
+    state.reelLoadObserver = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) loadMoreReels();
+    }, { root: document.getElementById("reelsFeed"), rootMargin: "280px 0px" });
+    state.reelLoadObserver.observe(sentinel);
+  }
+}
+
+async function activateReel(reelId) {
+  state.activeReelId = reelId;
+  if (state.reelPlayers.has(reelId) || state.reelPlayerLoading.has(reelId)) {
+    state.reelPlayers.get(reelId)?.playVideo();
+    return;
+  }
+  state.reelPlayerLoading.add(reelId);
+  try {
+    const youtube = await ensureYouTubeApi();
+    const element = document.getElementById(`reel-player-${reelId}`);
+    if (!element || state.activeReelId !== reelId) return;
+    const player = new youtube.Player(element, {
+      videoId: element.dataset.youtubeId,
+      playerVars: { autoplay: 1, controls: 1, playsinline: 1, rel: 0, origin: window.location.origin },
+      events: {
+        onReady: event => {
+          if (state.activeReelId === reelId) {
+            event.target.mute();
+            event.target.playVideo();
+          }
+        },
+        onStateChange: event => handleReelPlayerState(reelId, event.data),
+      },
+    });
+    state.reelPlayers.set(reelId, player);
+  } catch (error) {
+    document.getElementById("reelsFeed").dataset.playerError = error.message;
+  } finally {
+    state.reelPlayerLoading.delete(reelId);
+  }
+}
+
+function saveReelWatch(reelId, completed = false) {
+  const startedAt = state.reelPlayingSince.get(reelId);
+  if (startedAt) {
+    state.reelWatchSessions.set(reelId, (state.reelWatchSessions.get(reelId) || 0) + Date.now() - startedAt);
+    state.reelPlayingSince.set(reelId, Date.now());
+  }
+  const reel = state.reels.find(item => item.id === reelId);
+  if (!reel) return;
+  const watchMs = Math.min(3600000, (reel.watchMs || 0) + (state.reelWatchSessions.get(reelId) || 0));
+  const isYouTubeSuggestion = reel.source === "youtube";
+  return api(isYouTubeSuggestion
+    ? `/api/reels/youtube/${encodeURIComponent(reel.youtubeId)}/watch`
+    : `/api/reels/${encodeURIComponent(reelId)}/watch`, {
+    method: "POST",
+    body: JSON.stringify({ watchMs, completed, title: reel.caption, channelTitle: reel.creatorDisplayName }),
+  }).then(() => {
+    if (completed) reel.completed = 1;
+  }).catch(() => {});
+}
+
+function handleReelPlayerState(reelId, playerState) {
+  if (playerState === window.YT.PlayerState.PLAYING) {
+    if (!state.reelPlayingSince.has(reelId)) state.reelPlayingSince.set(reelId, Date.now());
+    if (!state.reelWatchTimers.has(reelId)) {
+      state.reelWatchTimers.set(reelId, setInterval(() => saveReelWatch(reelId), 10000));
+    }
+    return;
+  }
+  if (playerState === window.YT.PlayerState.PAUSED || playerState === window.YT.PlayerState.ENDED) {
+    clearInterval(state.reelWatchTimers.get(reelId));
+    state.reelWatchTimers.delete(reelId);
+    saveReelWatch(reelId, playerState === window.YT.PlayerState.ENDED);
+    state.reelPlayingSince.delete(reelId);
+  }
+}
+
 function renderNotifications() {
   const target = document.getElementById("notificationList");
   if (!state.notifications.length) {
@@ -241,7 +544,7 @@ function renderThreads() {
     target.innerHTML = emptyState(query ? "검색 결과가 없어요" : "메시지를 시작해보세요", query ? "아이디나 이름을 다시 확인해주세요." : "새 메시지 버튼에서 실제 가입 사용자를 찾아 대화를 시작할 수 있어요.");
     return;
   }
-  target.innerHTML = conversations.map(item => `<button class="thread ${item.id === state.activeConversationId ? "selected" : ""}" type="button" data-chat="${escapeHtml(item.id)}"><span class="initial-avatar">${escapeHtml(initials(item.displayName))}</span><span class="thread-copy"><span class="thread-top"><span class="thread-name">${escapeHtml(item.displayName)}</span><span class="thread-time">${item.lastMessageAt ? escapeHtml(formatTime(item.lastMessageAt)) : ""}</span></span><span class="thread-bottom"><span class="preview">${escapeHtml(item.lastMessage || `@${item.username}`)}</span></span></span></button>`).join("");
+  target.innerHTML = conversations.map(item => `<button class="thread ${item.id === state.activeConversationId ? "selected" : ""}" type="button" data-chat="${escapeHtml(item.id)}"><span class="initial-avatar">${escapeHtml(initials(item.displayName))}</span><span class="thread-copy"><span class="thread-top"><span class="thread-name">${escapeHtml(item.displayName)}</span><span class="thread-time">${item.lastMessageAt ? escapeHtml(formatTime(item.lastMessageAt)) : ""}</span></span><span class="thread-bottom"><span class="preview">${escapeHtml(item.lastMessage || (item.groupName ? `${item.memberCount}명 그룹 대화` : `@${item.username}`))}</span></span></span></button>`).join("");
 }
 
 function renderMessages() {
@@ -280,6 +583,7 @@ async function openConversation(id) {
   if (conversation) {
     document.getElementById("chatName").textContent = conversation.displayName;
     document.getElementById("chatAvatar").textContent = initials(conversation.displayName);
+    document.getElementById("chatStatus").textContent = conversation.groupName ? `${conversation.memberCount}명 그룹 대화` : `@${conversation.username}`;
   }
   try {
     const result = await api(`/api/conversations/${encodeURIComponent(id)}/messages`);
@@ -324,7 +628,12 @@ async function searchUsers(query) {
   }
   try {
     const result = await api(`/api/users?q=${encodeURIComponent(query.trim())}`);
-    target.innerHTML = result.users.length ? result.users.map(user => `<div class="user-result"><span class="initial-avatar">${escapeHtml(initials(user.displayName))}</span><span class="user-result-copy"><strong>${escapeHtml(user.username)}</strong><span>${escapeHtml(user.displayName)}</span></span><span class="user-result-actions"><button class="follow-button" type="button" data-follow="${escapeHtml(user.id)}" data-following="${user.isFollowing ? "true" : "false"}">${user.isFollowing ? "팔로잉" : "팔로우"}</button>${user.isFollowing && user.followsYou ? `<button class="chat-user-button" type="button" data-chat-user="${escapeHtml(user.id)}">채팅</button>` : `<span class="follow-hint">상호 팔로우 후 채팅</span>`}</span></div>`).join("") : emptyState("사용자가 없어요", "가입한 아이디 또는 이름을 다시 검색해보세요.");
+    target.innerHTML = result.users.length ? result.users.map(user => {
+      const action = state.groupMode
+        ? user.canGroup ? `<button class="chat-user-button" type="button" data-group-select="${escapeHtml(user.id)}">${state.selectedGroupUsers.has(user.id) ? "선택됨" : "추가"}</button>` : `<span class="follow-hint">맞팔로우 후 초대 가능</span>`
+        : `<button class="follow-button" type="button" data-follow="${escapeHtml(user.id)}" data-following="${user.isFollowing ? "true" : "false"}">${user.isFollowing ? "팔로잉" : "팔로우"}</button>${user.isFollowing && user.followsYou ? `<button class="chat-user-button" type="button" data-chat-user="${escapeHtml(user.id)}">채팅</button>` : `<span class="follow-hint">상호 팔로우 후 채팅</span>`}`;
+      return `<div class="user-result"><span class="initial-avatar">${escapeHtml(initials(user.displayName))}</span><span class="user-result-copy"><strong>${escapeHtml(user.username)}</strong><span>${escapeHtml(user.displayName)}</span></span><span class="user-result-actions">${action}</span></div>`;
+    }).join("") : emptyState("사용자가 없어요", "가입한 아이디 또는 이름을 다시 검색해보세요.");
   } catch (error) {
     target.innerHTML = emptyState("검색할 수 없어요", error.message);
   }
@@ -372,20 +681,158 @@ document.getElementById("authScreen").addEventListener("click", event => {
 });
 
 document.querySelectorAll(".rail-button[data-view], .rail-avatar, .page-top [data-view]").forEach(button => button.addEventListener("click", () => setView(button.dataset.view)));
+document.getElementById("storyUpload").addEventListener("change", async event => {
+  const file = event.target.files[0];
+  if (!file) return;
+  try {
+    const imageData = await compressImage(file);
+    if (imageData.length > 4_000_000) throw new Error("사진을 압축한 뒤에도 용량이 큽니다. 다른 사진을 선택해주세요.");
+    await api("/api/stories", { method: "POST", body: JSON.stringify({ imageData }) });
+    await loadAppData();
+    await openStoryGroup(state.user.id);
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    event.target.value = "";
+  }
+});
+document.getElementById("storyViewer").addEventListener("close", () => {
+  clearTimeout(state.storyTimer);
+  state.activeStoryUserId = null;
+});
+document.getElementById("closeStoryViewer").addEventListener("click", closeStoryViewer);
+document.querySelectorAll("[data-story-step]").forEach(button => button.addEventListener("click", () => stepStory(Number(button.dataset.storyStep))));
+document.querySelectorAll("[data-reels-sort]").forEach(button => button.addEventListener("click", () => {
+  if (state.reelSort === button.dataset.reelsSort) return;
+  state.reelSort = button.dataset.reelsSort;
+  loadReels();
+}));
+document.getElementById("openReelDialog").addEventListener("click", () => {
+  document.getElementById("reelFormError").textContent = "";
+  document.getElementById("addReelDialog").showModal();
+});
+document.getElementById("cancelReelDialog").addEventListener("click", () => document.getElementById("addReelDialog").close());
+document.getElementById("addReelForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const submitButton = form.querySelector("button[type=submit]");
+  submitButton.disabled = true;
+  document.getElementById("reelFormError").textContent = "";
+  try {
+    await api("/api/reels", {
+      method: "POST",
+      body: JSON.stringify({
+        url: document.getElementById("reelUrl").value.trim(),
+        caption: document.getElementById("reelCaption").value.trim(),
+      }),
+    });
+    form.reset();
+    document.getElementById("addReelDialog").close();
+    await loadReels();
+    document.getElementById("reelsFeed").scrollTop = 0;
+  } catch (error) {
+    document.getElementById("reelFormError").textContent = error.message;
+  } finally {
+    submitButton.disabled = false;
+  }
+});
 document.querySelector('[data-action="focus-post"]').addEventListener("click", () => {
   document.getElementById("postText").focus();
   document.getElementById("postForm").scrollIntoView({ behavior: "smooth", block: "center" });
 });
 document.querySelector(".compose").addEventListener("click", () => {
+  state.groupMode = false;
+  state.selectedGroupUsers.clear();
+  document.getElementById("groupModeToggle").textContent = "단체 대화 만들기";
+  document.getElementById("groupNameInput").value = "";
+  document.getElementById("groupNameWrap").hidden = true;
+  document.getElementById("groupSelectedUsers").hidden = true;
+  document.getElementById("createGroupButton").hidden = true;
+  renderGroupSelection();
   document.getElementById("userSearch").value = "";
   document.getElementById("userResults").innerHTML = "";
   document.getElementById("newChatDialog").showModal();
   document.getElementById("userSearch").focus();
 });
-document.getElementById("newChatForm").addEventListener("submit", event => event.preventDefault());
+document.getElementById("groupModeToggle").addEventListener("click", () => {
+  state.groupMode = !state.groupMode;
+  state.selectedGroupUsers.clear();
+  document.getElementById("groupModeToggle").textContent = state.groupMode ? "개인 대화로 전환" : "단체 대화 만들기";
+  document.getElementById("groupNameWrap").hidden = !state.groupMode;
+  document.getElementById("groupSelectedUsers").hidden = !state.groupMode;
+  document.getElementById("createGroupButton").hidden = !state.groupMode;
+  renderGroupSelection();
+  searchUsers(document.getElementById("userSearch").value);
+});
+document.getElementById("newChatForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!state.groupMode || state.selectedGroupUsers.size < 2 || state.selectedGroupUsers.size > 9) return;
+  const button = document.getElementById("createGroupButton");
+  button.disabled = true;
+  try {
+    const result = await api("/api/conversations/group", {
+      method: "POST",
+      body: JSON.stringify({ userIds: [...state.selectedGroupUsers.keys()], groupName: document.getElementById("groupNameInput").value.trim() }),
+    });
+    document.getElementById("newChatDialog").close();
+    await loadAppData();
+    await openConversation(result.conversation.id);
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
 document.getElementById("cancelNewChat").addEventListener("click", () => document.getElementById("newChatDialog").close());
 
 document.addEventListener("click", async event => {
+  const storyAdd = event.target.closest("[data-story-add]");
+  if (storyAdd) document.getElementById("storyUpload").click();
+  const storyUser = event.target.closest("[data-story-user]");
+  if (storyUser) await openStoryGroup(storyUser.dataset.storyUser);
+  const groupSelect = event.target.closest("[data-group-select]");
+  if (groupSelect) {
+    const user = [...document.querySelectorAll("[data-group-select]")]
+      .find(button => button.dataset.groupSelect === groupSelect.dataset.groupSelect)?.closest(".user-result");
+    if (state.selectedGroupUsers.has(groupSelect.dataset.groupSelect)) state.selectedGroupUsers.delete(groupSelect.dataset.groupSelect);
+    else if (state.selectedGroupUsers.size < 9 && user) {
+      state.selectedGroupUsers.set(groupSelect.dataset.groupSelect, {
+        id: groupSelect.dataset.groupSelect,
+        username: user.querySelector(".user-result-copy strong").textContent,
+        displayName: user.querySelector(".user-result-copy span").textContent,
+      });
+    }
+    renderGroupSelection();
+    await searchUsers(document.getElementById("userSearch").value);
+  }
+  const groupRemove = event.target.closest("[data-group-remove]");
+  if (groupRemove) {
+    state.selectedGroupUsers.delete(groupRemove.dataset.groupRemove);
+    renderGroupSelection();
+    await searchUsers(document.getElementById("userSearch").value);
+  }
+  const reelLike = event.target.closest("[data-reel-like]");
+  if (reelLike) {
+    const reel = state.reels.find(item => item.id === reelLike.dataset.reelLike);
+    if (reel) {
+      try {
+        const isYouTubeSuggestion = reel.source === "youtube";
+        const result = await api(isYouTubeSuggestion
+          ? `/api/reels/youtube/${encodeURIComponent(reel.youtubeId)}/like`
+          : `/api/reels/${encodeURIComponent(reel.id)}/like`, {
+          method: "POST",
+          ...(isYouTubeSuggestion ? { body: JSON.stringify({ title: reel.caption, channelTitle: reel.creatorDisplayName }) } : {}),
+        });
+        reel.liked = result.liked;
+        reel.likes = Math.max(0, reel.likes + (result.liked ? 1 : -1));
+        reelLike.classList.toggle("liked", reel.liked);
+        reelLike.setAttribute("aria-pressed", String(reel.liked));
+        reelLike.querySelector("span").textContent = reel.likes;
+      } catch (error) {
+        alert(error.message);
+      }
+    }
+  }
   const thread = event.target.closest("[data-chat]");
   if (thread) await openConversation(thread.dataset.chat);
   const followButton = event.target.closest("[data-follow]");
@@ -418,12 +865,6 @@ document.addEventListener("click", async event => {
     } catch (error) {
       alert(error.message);
     }
-  }
-  const storyButton = event.target.closest("[data-story]");
-  if (storyButton) {
-    state.storyUserId = storyButton.dataset.story === "mine" ? state.user.id : storyButton.dataset.story;
-    renderAll();
-    document.getElementById("homePosts").scrollIntoView({ behavior: "smooth", block: "start" });
   }
 });
 

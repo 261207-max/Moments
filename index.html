@@ -137,6 +137,28 @@
     .story-ring { display: block; width: 48px; height: 48px; padding: 3px; border-radius: 50%; background: conic-gradient(from 25deg, #ff765e, #f8c64f, #a4da51, #ff765e); }
     .story-ring.seen { background: #dedfd9; }
     .story-ring img { display: block; width: 100%; height: 100%; border: 2px solid white; border-radius: 50%; object-fit: cover; }
+    .story-item { position: relative; flex: 0 0 62px; }
+    .story-open { position: relative; }
+    .story-add-badge { position: absolute; right: 2px; bottom: 17px; display: grid; width: 20px; height: 20px; place-items: center; padding: 0; border: 2px solid #fff; border-radius: 50%; background: #0095f6; color: #fff; font-size: 15px; line-height: 1; cursor: pointer; }
+    .story-progress { position: absolute; z-index: 3; top: 10px; right: 10px; left: 10px; display: flex; gap: 4px; }
+    .story-progress-track { flex: 1; height: 3px; overflow: hidden; border-radius: 3px; background: #ffffff70; }
+    .story-progress-track > span { display: block; width: 0; height: 100%; background: #fff; }
+    .story-progress-track > span.complete { width: 100%; }
+    .story-progress-track > span.current { width: 100%; animation: story-progress 5s linear; transform-origin: left; }
+    @keyframes story-progress { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+    #storyViewer { width: min(410px, calc(100% - 24px)); height: min(740px, calc(100dvh - 24px)); padding: 0; overflow: hidden; border: 0; border-radius: 12px; background: #111; color: #fff; }
+    #storyViewer::backdrop { background: #111d; backdrop-filter: blur(4px); }
+    .story-viewer-inner { position: relative; display: flex; width: 100%; height: 100%; flex-direction: column; background: #111; }
+    .story-viewer-head { position: absolute; z-index: 2; top: 21px; right: 15px; left: 15px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .story-viewer-author { display: grid; gap: 3px; padding-top: 5px; }
+    .story-viewer-author strong { font-size: 11px; }
+    .story-viewer-author span { color: #ddd; font-size: 9px; }
+    .story-viewer-close { width: 32px; height: 32px; border: 0; background: transparent; color: #fff; font-size: 25px; cursor: pointer; }
+    .story-viewer-image { display: block; width: 100%; height: 100%; object-fit: contain; }
+    .story-viewer-caption { position: absolute; right: 18px; bottom: 20px; left: 18px; margin: 0; color: #fff; font-size: 12px; line-height: 1.5; text-shadow: 0 1px 5px #000; }
+    .story-step { position: absolute; z-index: 2; top: 50%; display: grid; width: 38px; height: 54px; place-items: center; border: 0; background: #0000; color: #fff; font-size: 26px; cursor: pointer; transform: translateY(-50%); }
+    .story-step.previous { left: 0; }
+    .story-step.next { right: 0; }
     .story-name { display: block; overflow: hidden; margin-top: 6px; color: #73796f; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
     .filter-row { display: flex; gap: 7px; padding: 15px 23px 11px; }
     .filter { padding: 7px 12px; border: 0; border-radius: 999px; background: transparent; color: #82877f; font-size: 11px; font-weight: 600; cursor: pointer; }
@@ -267,7 +289,44 @@
     .follow-hint { color: #737373; font-size: 9px; white-space: nowrap; }
     .notification-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     .logout-button { justify-self: start; min-height: 36px; padding: 0 12px; border: 1px solid #dbdbdb; border-radius: 7px; background: #fff; color: #262626; font-size: 11px; cursor: pointer; }
-    @media (max-width: 680px) { .auth-panel { padding: 26px 25px; }.story-strip { margin-bottom: 15px; }.home-sidebar { grid-template-columns: 1fr; }.composer-card { order: 0; } }
+    .reels-shell { width: min(1120px, 100%); margin: 0 auto; padding: 34px clamp(18px, 4vw, 48px) 42px; }
+    .reels-heading { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 20px; }
+    .reels-heading h1 { font-size: 27px; }
+    .reels-heading p { margin: 6px 0 0; color: #737373; font-size: 11px; }
+    .reels-layout { display: grid; grid-template-columns: minmax(0, 430px) minmax(210px, 280px); justify-content: center; align-items: start; gap: 34px; }
+    .reels-feed { height: min(730px, calc(100dvh - 175px)); min-height: 440px; overflow-y: auto; overscroll-behavior: contain; scroll-snap-type: y mandatory; scrollbar-color: #bdbdbd transparent; }
+    .reel-card { position: relative; width: min(100%, 410px); height: 100%; min-height: 100%; max-height: 730px; aspect-ratio: 9 / 16; margin: 0 auto 16px; overflow: hidden; scroll-snap-align: start; background: #101010; color: #fff; }
+    .reel-player { position: absolute; inset: 0; background: #111; }
+    .reel-player iframe { width: 100%; height: 100%; border: 0; }
+    .reel-shade { position: absolute; inset: 45% 0 0; pointer-events: none; background: linear-gradient(transparent, #000b); }
+    .reel-copy { position: absolute; right: 68px; bottom: 23px; left: 18px; display: grid; gap: 8px; pointer-events: none; }
+    .reel-copy a { width: fit-content; color: #fff; font-size: 10px; pointer-events: auto; text-decoration: underline; text-underline-offset: 3px; }
+    .reel-copy p { margin: 0; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+    .reel-copy strong { font-size: 12px; }
+    .reel-reason { width: fit-content; padding: 5px 8px; border: 1px solid #ffffff50; border-radius: 999px; background: #0005; font-size: 9px; }
+    .reel-actions { position: absolute; right: 13px; bottom: 84px; display: grid; justify-items: center; gap: 5px; }
+    .reel-like { display: grid; justify-items: center; gap: 2px; min-width: 42px; padding: 7px 4px; border: 0; background: transparent; color: #fff; cursor: pointer; }
+    .reel-like svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .reel-like.liked svg { fill: #ff3040; stroke: #ff3040; }
+    .reel-like span, .reel-signal { font-size: 10px; font-weight: 700; text-shadow: 0 1px 5px #000; }
+    .reel-signal { min-height: 14px; }
+    .reels-aside { padding-top: 5px; }
+    .reel-guide { padding: 16px 0; border-top: 1px solid #e8e8e8; }
+    .reel-guide h2 { margin: 0 0 8px; font-size: 13px; }
+    .reel-guide p { margin: 0; color: #737373; font-size: 11px; line-height: 1.7; }
+    .reel-modes { display: inline-flex; gap: 3px; padding: 3px; border: 1px solid #e5e5e5; border-radius: 9px; background: #f7f7f7; }
+    .reel-modes button { min-height: 31px; padding: 0 11px; border: 0; border-radius: 6px; background: transparent; color: #737373; font-size: 10px; font-weight: 700; cursor: pointer; }
+    .reel-modes button.active { background: #fff; color: #262626; box-shadow: 0 1px 3px #0001; }
+    .reel-dialog-form { display: grid; gap: 10px; }
+    .reel-dialog-form label { display: grid; gap: 6px; color: #555; font-size: 10px; font-weight: 700; }
+    .reel-form-error { min-height: 16px; margin: 0 !important; color: #d93025 !important; }
+    .reel-api-status { margin-top: 12px !important; color: #8a5a00 !important; font-size: 10px !important; }
+    .reel-load-sentinel { min-height: 1px; }
+    .group-name-wrap { display: grid; gap: 7px; color: #656b61; font-size: 11px; font-weight: 600; }
+    .group-selected-list { display: flex; flex-wrap: wrap; gap: 6px; }
+    .group-selected-chip { padding: 5px 8px; border: 0; border-radius: 999px; background: #f0f3e8; color: #4a5637; font-size: 10px; cursor: pointer; }
+    .group-submit { width: 100%; }
+    @media (max-width: 680px) { .auth-panel { padding: 26px 25px; }.story-strip { margin-bottom: 15px; }.home-sidebar { grid-template-columns: 1fr; }.composer-card { order: 0; }.reels-shell { padding: 22px 12px 30px; }.reels-heading { align-items: flex-start; }.reels-heading h1 { font-size: 23px; }.reels-layout { grid-template-columns: minmax(0, 1fr); gap: 14px; }.reels-feed { height: calc(100dvh - 235px); min-height: 390px; }.reel-card { width: min(100%, 390px); }.reels-aside { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 0 4px; }.reel-guide { padding: 10px 0; }.reel-guide p { font-size: 9px; } }
   </style>
 </head>
 <body>
@@ -300,6 +359,7 @@
       <div class="brand-mark" aria-label="Moments">m</div>
       <nav class="rail-nav">
         <button class="rail-button active" data-view="home" aria-label="홈" title="홈"><svg viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/></svg></button>
+        <button class="rail-button" data-view="reels" aria-label="릴스" title="릴스"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="13" height="18" rx="2"/><path d="m16 9 5-3v12l-5-3z"/></svg></button>
         <button class="rail-button" data-view="messages" aria-label="메시지" title="메시지"><svg viewBox="0 0 24 24"><path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8z"/></svg></button>
         <button class="rail-button" data-view="explore" aria-label="탐색" title="탐색"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.4-4.4M11 8v6m-3-3h6"/></svg></button>
         <button class="rail-button" data-view="notifications" aria-label="알림" title="알림"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg></button>
@@ -317,6 +377,7 @@
         </div>
       </div>
     </section>
+    <section class="view" id="reelsView" hidden><div class="reels-shell"><header class="reels-heading"><div><p class="eyebrow">MOMENTS / REELS</p><h1>릴스</h1><p>짧은 영상, 지금의 취향.</p></div><button class="primary-button" type="button" id="openReelDialog"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>릴스 추가</button></header><div class="reels-layout"><div><div class="reel-modes" role="group" aria-label="릴스 정렬"><button class="active" type="button" data-reels-sort="recommended">추천</button><button type="button" data-reels-sort="latest">최신</button></div><div class="reels-feed" id="reelsFeed" aria-label="릴스 피드"></div></div><aside class="reels-aside"><section class="reel-guide"><h2>추천 피드</h2><p>좋아요와 완주, 시청한 시간, 영상 소개의 주제어를 반영합니다. 반응이 쌓일수록 취향에 가까운 순서로 바뀝니다.</p></section><section class="reel-guide"><h2>YouTube Shorts</h2><p>공개 Shorts 링크는 공식 플레이어로 재생됩니다.</p><p id="reelApiStatus" class="reel-api-status" role="status"></p></section></aside></div></div></section>
     <section class="view" id="exploreView" hidden><div class="content-shell"><header class="page-top"><div><p class="eyebrow">MOMENTS / EXPLORE</p><h1>탐색</h1><p>내가 남긴 순간을 검색해보세요.</p></div></header><input class="explore-search" id="exploreSearch" type="search" placeholder="게시물 검색" aria-label="게시물 검색"><div class="post-list" id="explorePosts"></div></div></section>
     <section class="view" id="notificationsView" hidden><div class="content-shell"><header class="page-top"><div><p class="eyebrow">MOMENTS / ACTIVITY</p><h1>알림</h1><p>팔로우와 게시물 활동을 확인하세요.</p></div></header><div class="post-list" id="notificationList"></div></div></section>
     <section class="view" id="profileView" hidden><div class="content-shell"><header class="page-top"><div><p class="eyebrow">MOMENTS / PROFILE</p><h1>프로필</h1><p>내가 기록한 순간들.</p></div><button class="primary-button" data-view="settings" type="button">프로필 수정</button></header><div class="profile-heading"><span class="initial-avatar" id="profileInitial">나</span><div><h2 id="profileName">내 모먼츠</h2><p>나의 기록</p></div></div><div class="section-heading"><h2>내 게시물</h2></div><div class="post-list" id="profilePosts"></div></div></section>
@@ -351,7 +412,10 @@
         </div>
       </form>
     </section>
-    <dialog class="dialog" id="newChatDialog"><form class="dialog-inner" id="newChatForm"><h2>새 메시지</h2><p>서로 팔로우하면 메시지를 주고받을 수 있습니다.</p><input class="form-input" id="userSearch" type="search" minlength="2" autocomplete="off" placeholder="아이디 또는 이름 검색" aria-label="사용자 검색"><div id="userResults"></div><div class="dialog-actions"><button class="secondary-button" type="button" id="cancelNewChat">닫기</button></div></form></dialog>
+    <dialog class="dialog" id="newChatDialog"><form class="dialog-inner" id="newChatForm"><h2>새 메시지</h2><p>서로 팔로우한 사용자와 대화할 수 있습니다.</p><button class="secondary-button" type="button" id="groupModeToggle">단체 대화 만들기</button><label class="group-name-wrap" id="groupNameWrap" hidden>그룹 이름<input class="form-input" id="groupNameInput" maxlength="30" placeholder="예: 우리 모임"></label><input class="form-input" id="userSearch" type="search" minlength="2" autocomplete="off" placeholder="아이디 또는 이름 검색" aria-label="사용자 검색"><div class="group-selected-list" id="groupSelectedUsers" hidden></div><div id="userResults"></div><button class="primary-button group-submit" id="createGroupButton" type="submit" hidden disabled>그룹 대화 시작</button><div class="dialog-actions"><button class="secondary-button" type="button" id="cancelNewChat">닫기</button></div></form></dialog>
+    <dialog class="dialog" id="addReelDialog"><form class="dialog-inner reel-dialog-form" id="addReelForm"><h2>릴스 추가</h2><p>YouTube Shorts 또는 동영상의 공개 링크를 등록하세요.</p><label>영상 링크<input class="form-input" id="reelUrl" type="url" placeholder="https://youtube.com/shorts/..." required></label><label>영상 소개<input class="form-input" id="reelCaption" maxlength="240" placeholder="무슨 영상인가요?" required></label><p class="reel-form-error" id="reelFormError" role="alert"></p><div class="dialog-actions"><button class="secondary-button" type="button" id="cancelReelDialog">취소</button><button class="primary-button" type="submit">추가</button></div></form></dialog>
+    <dialog id="storyViewer" aria-label="스토리"><div class="story-viewer-inner"><div class="story-progress" id="storyViewerProgress"></div><header class="story-viewer-head"><div class="story-viewer-author"><strong id="storyViewerName"></strong><span id="storyViewerTime"></span></div><button class="story-viewer-close" type="button" id="closeStoryViewer" aria-label="스토리 닫기">×</button></header><img class="story-viewer-image" id="storyViewerImage" alt="스토리 사진"><p class="story-viewer-caption" id="storyViewerCaption"></p><button class="story-step previous" type="button" data-story-step="-1" aria-label="이전 스토리">‹</button><button class="story-step next" type="button" data-story-step="1" aria-label="다음 스토리">›</button></div></dialog>
+    <input type="file" id="storyUpload" accept="image/*" hidden>
     <input type="file" id="messageImage" accept="image/*" hidden>
   </main>
   <script type="text/plain" id="legacyLocalPrototype">
