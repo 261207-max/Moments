@@ -251,10 +251,16 @@
     .story-ring { display: grid; place-items: center; width: 54px; height: 54px; padding: 3px; border-radius: 50%; background: linear-gradient(45deg, #feda75, #fa7e1e, #d62976, #962fbf); }
     .story-ring > span { display: grid; width: 100%; height: 100%; place-items: center; border: 2px solid #fff; border-radius: 50%; background: #fff; color: #c13584; font-size: 14px; font-weight: 700; }
     .story-name { max-width: 62px; overflow: hidden; color: #262626; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-    .user-result { display: flex; width: 100%; align-items: center; gap: 11px; padding: 10px 0; border: 0; border-bottom: 1px solid #efefef; background: #fff; text-align: left; cursor: pointer; }
+    .user-result { display: flex; width: 100%; align-items: center; gap: 11px; padding: 10px 0; border-bottom: 1px solid #efefef; }
     .user-result-copy { display: grid; gap: 3px; }
     .user-result-copy strong { font-size: 11px; }
     .user-result-copy span { color: #737373; font-size: 10px; }
+    .user-result-actions { display: flex; align-items: center; gap: 7px; margin-left: auto; }
+    .follow-button, .chat-user-button { min-height: 31px; padding: 0 10px; border: 1px solid #dbdbdb; border-radius: 7px; background: #fff; color: #262626; font-size: 10px; font-weight: 700; cursor: pointer; }
+    .follow-button { border-color: #0095f6; background: #0095f6; color: #fff; }
+    .follow-button[data-following="true"] { border-color: #dbdbdb; background: #fff; color: #262626; }
+    .follow-hint { color: #737373; font-size: 9px; white-space: nowrap; }
+    .notification-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     .logout-button { justify-self: start; min-height: 36px; padding: 0 12px; border: 1px solid #dbdbdb; border-radius: 7px; background: #fff; color: #262626; font-size: 11px; cursor: pointer; }
     @media (max-width: 680px) { .auth-panel { padding: 26px 25px; }.story-strip { margin-bottom: 15px; }.home-sidebar { grid-template-columns: 1fr; }.composer-card { order: 0; } }
   </style>
@@ -307,7 +313,7 @@
       </div>
     </section>
     <section class="view" id="exploreView" hidden><div class="content-shell"><header class="page-top"><div><p class="eyebrow">MOMENTS / EXPLORE</p><h1>탐색</h1><p>내가 남긴 순간을 검색해보세요.</p></div></header><input class="explore-search" id="exploreSearch" type="search" placeholder="게시물 검색" aria-label="게시물 검색"><div class="post-list" id="explorePosts"></div></div></section>
-    <section class="view" id="notificationsView" hidden><div class="content-shell"><header class="page-top"><div><p class="eyebrow">MOMENTS / ACTIVITY</p><h1>알림</h1><p>내 모먼츠의 최근 활동을 확인하세요.</p></div></header><div class="post-list" id="notificationList"></div></div></section>
+    <section class="view" id="notificationsView" hidden><div class="content-shell"><header class="page-top"><div><p class="eyebrow">MOMENTS / ACTIVITY</p><h1>알림</h1><p>팔로우와 게시물 활동을 확인하세요.</p></div></header><div class="post-list" id="notificationList"></div></div></section>
     <section class="view" id="profileView" hidden><div class="content-shell"><header class="page-top"><div><p class="eyebrow">MOMENTS / PROFILE</p><h1>프로필</h1><p>내가 기록한 순간들.</p></div><button class="primary-button" data-view="settings" type="button">프로필 수정</button></header><div class="profile-heading"><span class="initial-avatar" id="profileInitial">나</span><div><h2 id="profileName">내 모먼츠</h2><p>나의 기록</p></div></div><div class="section-heading"><h2>내 게시물</h2></div><div class="post-list" id="profilePosts"></div></div></section>
     <section class="view" id="settingsView" hidden><div class="content-shell"><header class="page-top"><div><p class="eyebrow">MOMENTS / SETTINGS</p><h1>설정</h1><p>프로필 정보를 관리하세요.</p></div></header><form class="settings-form" id="settingsForm"><label>아이디<input class="form-input" id="usernameDisplay" readonly></label><label>표시 이름<input class="form-input" id="displayName" maxlength="30" required></label><button class="primary-button" type="submit">변경사항 저장</button><button class="logout-button" type="button" id="logoutButton">로그아웃</button></form></div></section>
 
@@ -339,7 +345,7 @@
         </div>
       </form>
     </section>
-    <dialog class="dialog" id="newChatDialog"><form class="dialog-inner" id="newChatForm"><h2>새 메시지</h2><p>가입한 사용자에게 메시지를 보내세요.</p><input class="form-input" id="userSearch" type="search" minlength="2" autocomplete="off" placeholder="아이디 또는 이름 검색" aria-label="사용자 검색"><div id="userResults"></div><div class="dialog-actions"><button class="secondary-button" type="button" id="cancelNewChat">닫기</button></div></form></dialog>
+    <dialog class="dialog" id="newChatDialog"><form class="dialog-inner" id="newChatForm"><h2>새 메시지</h2><p>서로 팔로우하면 메시지를 주고받을 수 있습니다.</p><input class="form-input" id="userSearch" type="search" minlength="2" autocomplete="off" placeholder="아이디 또는 이름 검색" aria-label="사용자 검색"><div id="userResults"></div><div class="dialog-actions"><button class="secondary-button" type="button" id="cancelNewChat">닫기</button></div></form></dialog>
     <input type="file" id="messageImage" accept="image/*" hidden>
   </main>
   <script type="text/plain" id="legacyLocalPrototype">

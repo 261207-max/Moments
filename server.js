@@ -72,6 +72,19 @@ database.exec(`
     type TEXT NOT NULL CHECK (type IN ('like', 'comment')),
     created_at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS follows (
+    follower_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    followed_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (follower_id, followed_id),
+    CHECK (follower_id != followed_id)
+  );
+  CREATE TABLE IF NOT EXISTS follow_notifications (
+    id TEXT PRIMARY KEY,
+    recipient_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    actor_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL
+  );
   CREATE INDEX IF NOT EXISTS messages_conversation_time ON messages(conversation_id, created_at);
   CREATE INDEX IF NOT EXISTS posts_created_at ON posts(created_at DESC);
   CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
@@ -127,6 +140,18 @@ function requireAuth(request, response, next) {
 
 function publicUser(user) {
   return { id: user.id, username: user.username, displayName: user.displayName };
+}
+
+function areMutualFollowers(userId, otherUserId) {
+  return Boolean(database.prepare(`SELECT 1 FROM follows mine
+    JOIN follows theirs ON theirs.follower_id = mine.followed_id AND theirs.followed_id = mine.follower_id
+    WHERE mine.follower_id = ? AND mine.followed_id = ?`).get(userId, otherUserId));
+}
+
+function canChatInConversation(conversationId, userId) {
+  const otherMember = database.prepare(`SELECT user_id AS userId FROM conversation_members
+    WHERE conversation_id = ? AND user_id != ?`).get(conversationId, userId);
+  return Boolean(otherMember && areMutualFollowers(userId, otherMember.userId));
 }
 
 function getPost(postId, viewerId) {
@@ -254,12 +279,38 @@ app.patch("/api/me", requireAuth, (request, response) => {
   response.json({ user: publicUser(statements.userById.get(request.user.id)) });
 });
 
+app.post("/api/users/:id/follow", requireAuth, (request, response) => {
+  const followedId = request.params.id;
+  if (followedId === request.user.id) return response.status(400).json({ error: "자기 자신은 팔로우할 수 없습니다." });
+  if (!statements.userById.get(followedId)) return response.status(404).json({ error: "사용자를 찾을 수 없습니다." });
+  const result = database.prepare("INSERT OR IGNORE INTO follows (follower_id, followed_id, created_at) VALUES (?, ?, ?)")
+    .run(request.user.id, followedId, Date.now());
+  if (result.changes) {
+    const notification = { id: crypto.randomUUID(), type: "follow", userId: request.user.id,
+      username: request.user.username, displayName: request.user.displayName, createdAt: Date.now(),
+      isFollowing: Boolean(database.prepare("SELECT 1 FROM follows WHERE follower_id = ? AND followed_id = ?")
+        .get(followedId, request.user.id)) };
+    database.prepare("INSERT INTO follow_notifications (id, recipient_id, actor_id, created_at) VALUES (?, ?, ?, ?)")
+      .run(notification.id, followedId, request.user.id, notification.createdAt);
+    io.to(`user:${followedId}`).emit("notification:new", notification);
+  }
+  response.json({ following: true, mutual: areMutualFollowers(request.user.id, followedId) });
+});
+
+app.delete("/api/users/:id/follow", requireAuth, (request, response) => {
+  database.prepare("DELETE FROM follows WHERE follower_id = ? AND followed_id = ?").run(request.user.id, request.params.id);
+  response.json({ following: false, mutual: false });
+});
+
 app.get("/api/users", requireAuth, (request, response) => {
   const query = String(request.query.q || "").trim().slice(0, 40);
   if (query.length < 2) return response.json({ users: [] });
-  const users = database.prepare(`SELECT id, username, display_name AS displayName FROM users
+  const users = database.prepare(`SELECT id, username, display_name AS displayName,
+      EXISTS(SELECT 1 FROM follows WHERE follower_id = ? AND followed_id = users.id) AS isFollowing,
+      EXISTS(SELECT 1 FROM follows WHERE follower_id = users.id AND followed_id = ?) AS followsYou
+    FROM users
     WHERE id != ? AND (username LIKE ? OR display_name LIKE ?) COLLATE NOCASE
-    ORDER BY username LIMIT 20`).all(request.user.id, `%${query}%`, `%${query}%`);
+    ORDER BY username LIMIT 20`).all(request.user.id, request.user.id, request.user.id, `%${query}%`, `%${query}%`);
   response.json({ users });
 });
 
@@ -272,7 +323,10 @@ app.get("/api/conversations", requireAuth, (request, response) => {
     JOIN conversations ON conversations.id = mine.conversation_id
     JOIN conversation_members theirs ON theirs.conversation_id = conversations.id AND theirs.user_id != mine.user_id
     JOIN users other ON other.id = theirs.user_id
-    WHERE mine.user_id = ? ORDER BY COALESCE(lastMessageAt, conversations.created_at) DESC`).all(request.user.id);
+    WHERE mine.user_id = ?
+      AND EXISTS(SELECT 1 FROM follows WHERE follower_id = mine.user_id AND followed_id = other.id)
+      AND EXISTS(SELECT 1 FROM follows WHERE follower_id = other.id AND followed_id = mine.user_id)
+    ORDER BY COALESCE(lastMessageAt, conversations.created_at) DESC`).all(request.user.id);
   response.json({ conversations });
 });
 
@@ -280,6 +334,7 @@ app.post("/api/conversations", requireAuth, (request, response) => {
   const userId = String(request.body.userId || "");
   if (!userId || userId === request.user.id) return response.status(400).json({ error: "대화할 사용자를 선택해주세요." });
   if (!statements.userById.get(userId)) return response.status(404).json({ error: "사용자를 찾을 수 없습니다." });
+  if (!areMutualFollowers(request.user.id, userId)) return response.status(403).json({ error: "서로 팔로우해야 메시지를 주고받을 수 있습니다." });
   let conversation = database.prepare(`SELECT conversations.id FROM conversations
     JOIN conversation_members mine ON mine.conversation_id = conversations.id AND mine.user_id = ?
     JOIN conversation_members theirs ON theirs.conversation_id = conversations.id AND theirs.user_id = ?
@@ -287,13 +342,17 @@ app.post("/api/conversations", requireAuth, (request, response) => {
     .get(request.user.id, userId);
   if (!conversation) {
     const id = crypto.randomUUID();
-    const createConversation = database.transaction(() => {
+    database.exec("BEGIN");
+    try {
       database.prepare("INSERT INTO conversations (id, created_at) VALUES (?, ?)").run(id, Date.now());
       const addMember = database.prepare("INSERT INTO conversation_members (conversation_id, user_id) VALUES (?, ?)");
       addMember.run(id, request.user.id);
       addMember.run(id, userId);
-    });
-    createConversation();
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
     conversation = { id };
   }
   response.status(201).json({ conversation: { ...conversation, user: publicUser(statements.userById.get(userId)) } });
@@ -301,6 +360,7 @@ app.post("/api/conversations", requireAuth, (request, response) => {
 
 app.get("/api/conversations/:id/messages", requireAuth, (request, response) => {
   if (!statements.member.get(request.params.id, request.user.id)) return response.status(404).json({ error: "대화를 찾을 수 없습니다." });
+  if (!canChatInConversation(request.params.id, request.user.id)) return response.status(403).json({ error: "서로 팔로우해야 대화를 볼 수 있습니다." });
   const messages = database.prepare(`SELECT messages.id, messages.conversation_id AS conversationId,
       messages.sender_id AS senderId, messages.body, messages.created_at AS createdAt,
       users.username AS senderUsername, users.display_name AS senderDisplayName
@@ -317,10 +377,19 @@ app.get("/api/posts", requireAuth, (request, response) => {
 app.get("/api/notifications", requireAuth, (request, response) => {
   const notifications = database.prepare(`SELECT notifications.id, notifications.type,
       notifications.post_id AS postId, notifications.created_at AS createdAt,
-      users.username, users.display_name AS displayName
+      users.id AS userId, users.username, users.display_name AS displayName,
+      0 AS isFollowing
     FROM notifications JOIN users ON users.id = notifications.actor_id
     WHERE notifications.recipient_id = ? ORDER BY notifications.created_at DESC LIMIT 100`).all(request.user.id);
-  response.json({ notifications });
+  const followNotifications = database.prepare(`SELECT follow_notifications.id, 'follow' AS type,
+      NULL AS postId, follow_notifications.created_at AS createdAt,
+      users.id AS userId, users.username, users.display_name AS displayName,
+      EXISTS(SELECT 1 FROM follows WHERE follower_id = ? AND followed_id = users.id) AS isFollowing
+    FROM follow_notifications JOIN users ON users.id = follow_notifications.actor_id
+    WHERE follow_notifications.recipient_id = ? ORDER BY follow_notifications.created_at DESC LIMIT 100`)
+    .all(request.user.id, request.user.id);
+  response.json({ notifications: [...notifications, ...followNotifications]
+    .sort((left, right) => right.createdAt - left.createdAt).slice(0, 100) });
 });
 
 app.post("/api/posts", requireAuth, (request, response) => {
@@ -374,7 +443,8 @@ io.use((socket, next) => {
 io.on("connection", socket => {
   socket.join(`user:${socket.user.id}`);
   socket.on("conversation:join", (conversationId, callback = () => {}) => {
-    if (typeof conversationId !== "string" || !statements.member.get(conversationId, socket.user.id)) {
+    if (typeof conversationId !== "string" || !statements.member.get(conversationId, socket.user.id)
+      || !canChatInConversation(conversationId, socket.user.id)) {
       callback({ error: "대화에 참여할 수 없습니다." });
       return;
     }
@@ -389,7 +459,7 @@ io.on("connection", socket => {
       callback({ error: "메시지는 1~2000자로 입력해주세요." });
       return;
     }
-    if (!statements.member.get(conversationId, socket.user.id)) {
+    if (!statements.member.get(conversationId, socket.user.id) || !canChatInConversation(conversationId, socket.user.id)) {
       callback({ error: "대화에 참여할 수 없습니다." });
       return;
     }

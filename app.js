@@ -140,6 +140,16 @@ function connectSocket() {
     renderThreads();
     if (state.activeConversationId === message.conversationId) renderMessages();
   });
+  state.socket.on("notification:new", notification => {
+    if (state.notifications.some(item => item.id === notification.id)) return;
+    state.notifications.unshift(notification);
+    state.notifications = state.notifications.slice(0, 100);
+    renderNotifications();
+    const userSearch = document.getElementById("userSearch");
+    if (document.getElementById("newChatDialog").open && userSearch.value.trim().length >= 2) {
+      searchUsers(userSearch.value);
+    }
+  });
   state.socket.on("connect_error", error => {
     if (error.message.includes("인증")) showAuth();
   });
@@ -211,13 +221,14 @@ function renderExplore() {
 function renderNotifications() {
   const target = document.getElementById("notificationList");
   if (!state.notifications.length) {
-    target.innerHTML = emptyState("새 알림이 없어요", "좋아요와 댓글 알림이 여기에 표시됩니다.");
+    target.innerHTML = emptyState("새 알림이 없어요", "팔로우, 좋아요, 댓글 알림이 여기에 표시됩니다.");
     return;
   }
   target.innerHTML = state.notifications.map(item => {
     const date = new Intl.DateTimeFormat("ko-KR", { dateStyle: "medium", timeStyle: "short" }).format(new Date(item.createdAt));
-    const action = item.type === "like" ? "님이 회원님의 게시물을 좋아합니다." : "님이 회원님의 게시물에 댓글을 남겼습니다.";
-    return `<div class="side-panel"><strong>${escapeHtml(item.displayName)} ${action}</strong><p>${escapeHtml(date)}</p></div>`;
+    const action = item.type === "follow" ? "님이 회원님을 팔로우하기 시작했습니다." : item.type === "like" ? "님이 회원님의 게시물을 좋아합니다." : "님이 회원님의 게시물에 댓글을 남겼습니다.";
+    const followBack = item.type === "follow" && !item.isFollowing ? `<button class="follow-button notification-follow" type="button" data-follow="${escapeHtml(item.userId)}" data-following="false">팔로우</button>` : "";
+    return `<div class="side-panel notification-item"><div><strong>${escapeHtml(item.displayName)} ${action}</strong><p>${escapeHtml(date)}</p></div>${followBack}</div>`;
   }).join("");
 }
 
@@ -310,7 +321,7 @@ async function searchUsers(query) {
   }
   try {
     const result = await api(`/api/users?q=${encodeURIComponent(query.trim())}`);
-    target.innerHTML = result.users.length ? result.users.map(user => `<button class="user-result" type="button" data-user="${escapeHtml(user.id)}"><span class="initial-avatar">${escapeHtml(initials(user.displayName))}</span><span class="user-result-copy"><strong>${escapeHtml(user.username)}</strong><span>${escapeHtml(user.displayName)}</span></span></button>`).join("") : emptyState("사용자가 없어요", "가입한 아이디 또는 이름을 다시 검색해보세요.");
+    target.innerHTML = result.users.length ? result.users.map(user => `<div class="user-result"><span class="initial-avatar">${escapeHtml(initials(user.displayName))}</span><span class="user-result-copy"><strong>${escapeHtml(user.username)}</strong><span>${escapeHtml(user.displayName)}</span></span><span class="user-result-actions"><button class="follow-button" type="button" data-follow="${escapeHtml(user.id)}" data-following="${user.isFollowing ? "true" : "false"}">${user.isFollowing ? "팔로잉" : "팔로우"}</button>${user.isFollowing && user.followsYou ? `<button class="chat-user-button" type="button" data-chat-user="${escapeHtml(user.id)}">채팅</button>` : `<span class="follow-hint">상호 팔로우 후 채팅</span>`}</span></div>`).join("") : emptyState("사용자가 없어요", "가입한 아이디 또는 이름을 다시 검색해보세요.");
   } catch (error) {
     target.innerHTML = emptyState("검색할 수 없어요", error.message);
   }
@@ -374,10 +385,21 @@ document.getElementById("cancelNewChat").addEventListener("click", () => documen
 document.addEventListener("click", async event => {
   const thread = event.target.closest("[data-chat]");
   if (thread) await openConversation(thread.dataset.chat);
-  const userResult = event.target.closest("[data-user]");
-  if (userResult) {
+  const followButton = event.target.closest("[data-follow]");
+  if (followButton) {
     try {
-      const result = await api("/api/conversations", { method: "POST", body: JSON.stringify({ userId: userResult.dataset.user }) });
+      const method = followButton.dataset.following === "true" ? "DELETE" : "POST";
+      await api(`/api/users/${encodeURIComponent(followButton.dataset.follow)}/follow`, { method });
+      await loadAppData();
+      await searchUsers(document.getElementById("userSearch").value);
+    } catch (error) {
+      alert(error.message);
+    }
+  }
+  const chatUser = event.target.closest("[data-chat-user]");
+  if (chatUser) {
+    try {
+      const result = await api("/api/conversations", { method: "POST", body: JSON.stringify({ userId: chatUser.dataset.chatUser }) });
       document.getElementById("newChatDialog").close();
       await loadAppData();
       await openConversation(result.conversation.id);
