@@ -7,6 +7,7 @@ const state = {
   activeConversationId: null,
   socket: null,
   storyUserId: null,
+  pendingMessageImage: "",
 };
 
 const app = document.getElementById("app");
@@ -134,7 +135,7 @@ function connectSocket() {
     }
     const conversation = state.conversations.find(item => item.id === message.conversationId);
     if (conversation) {
-      conversation.lastMessage = message.body;
+      conversation.lastMessage = message.body || (message.imageData ? "사진을 보냈습니다." : "");
       conversation.lastMessageAt = message.createdAt;
     }
     renderThreads();
@@ -257,7 +258,9 @@ function renderMessages() {
   target.innerHTML = `<div class="day-divider">메시지</div>${messages.map(message => {
     const mine = message.senderId === state.user.id;
     const date = formatTime(message.createdAt);
-    return `<div class="message-row ${mine ? "mine" : "theirs"}">${mine ? "" : `<span class="initial-avatar">${escapeHtml(initials(message.senderDisplayName))}</span>`}<div class="bubble">${escapeHtml(message.body)}</div><span class="message-meta">${escapeHtml(date)}</span></div>`;
+    const image = message.imageData ? `<img class="photo-message" src="${escapeHtml(message.imageData)}" alt="메시지 사진" loading="lazy">` : "";
+    const text = message.body ? `<div class="bubble">${escapeHtml(message.body)}</div>` : "";
+    return `<div class="message-row ${mine ? "mine" : "theirs"}">${mine ? "" : `<span class="initial-avatar">${escapeHtml(initials(message.senderDisplayName))}</span>`}<div class="message-content">${image}${text}</div><span class="message-meta">${escapeHtml(date)}</span></div>`;
   }).join("")}`;
   target.scrollTop = target.scrollHeight;
 }
@@ -466,18 +469,48 @@ document.getElementById("messageForm").addEventListener("submit", event => {
   event.preventDefault();
   const input = document.getElementById("messageInput");
   const body = input.value.trim();
-  if (!body || !state.activeConversationId || !state.socket?.connected) return;
-  state.socket.emit("message:send", { conversationId: state.activeConversationId, body }, result => {
+  const imageData = state.pendingMessageImage;
+  if ((!body && !imageData) || !state.activeConversationId) return;
+  if (!state.socket?.connected) {
+    alert("메시지 서버에 연결되지 않았습니다. 잠시 후 다시 시도해주세요.");
+    return;
+  }
+  const sendButton = event.currentTarget.querySelector("button[type=submit]");
+  sendButton.disabled = true;
+  state.socket.emit("message:send", { conversationId: state.activeConversationId, body, imageData }, result => {
+    sendButton.disabled = false;
     if (result?.error) {
       alert(result.error);
       return;
     }
     input.value = "";
+    state.pendingMessageImage = "";
+    document.getElementById("messageImagePreview").hidden = true;
+    document.getElementById("messageImagePreviewImage").removeAttribute("src");
     input.focus();
   });
 });
 document.getElementById("attachMessage").addEventListener("click", () => document.getElementById("messageImage").click());
-document.getElementById("messageImage").addEventListener("change", () => alert("사진 메시지는 현재 준비 중이에요. 게시물 사진 공유를 이용해주세요."));
+document.getElementById("messageImage").addEventListener("change", async event => {
+  const file = event.target.files[0];
+  if (!file) return;
+  try {
+    const imageData = await compressImage(file);
+    if (imageData.length > 4_000_000) throw new Error("압축 후 사진이 너무 큽니다. 더 작은 사진을 선택해주세요.");
+    state.pendingMessageImage = imageData;
+    document.getElementById("messageImagePreviewImage").src = imageData;
+    document.getElementById("messageImagePreview").hidden = false;
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    event.target.value = "";
+  }
+});
+document.getElementById("removeMessageImage").addEventListener("click", () => {
+  state.pendingMessageImage = "";
+  document.getElementById("messageImagePreview").hidden = true;
+  document.getElementById("messageImagePreviewImage").removeAttribute("src");
+});
 document.getElementById("insertEmoji").addEventListener("click", () => {
   const input = document.getElementById("messageInput");
   input.value += "🙂";

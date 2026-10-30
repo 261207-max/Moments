@@ -9,7 +9,7 @@ const { Server: SocketServer } = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
-const io = new SocketServer(server, { maxHttpBufferSize: 1e6 });
+const io = new SocketServer(server, { maxHttpBufferSize: 5e6 });
 const database = new DatabaseSync(process.env.MOMENTS_DB_PATH || path.join(__dirname, "moments.db"));
 const googleOAuthClient = new OAuth2Client();
 const sessionDuration = 30 * 24 * 60 * 60 * 1000;
@@ -93,6 +93,8 @@ database.exec(`
 const userColumns = new Set(database.prepare("PRAGMA table_info(users)").all().map(column => column.name));
 if (!userColumns.has("email")) database.exec("ALTER TABLE users ADD COLUMN email TEXT");
 if (!userColumns.has("google_sub")) database.exec("ALTER TABLE users ADD COLUMN google_sub TEXT");
+const messageColumns = new Set(database.prepare("PRAGMA table_info(messages)").all().map(column => column.name));
+if (!messageColumns.has("image_data")) database.exec("ALTER TABLE messages ADD COLUMN image_data TEXT NOT NULL DEFAULT ''");
 database.exec("CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users(email) WHERE email IS NOT NULL; CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub_unique ON users(google_sub) WHERE google_sub IS NOT NULL;");
 
 app.disable("x-powered-by");
@@ -243,7 +245,7 @@ app.post("/api/auth/register", async (request, response, next) => {
     createSession(user.id, response);
     response.status(201).json({ user });
   } catch (error) {
-    if (error.code === "SQLITE_CONSTRAINT_UNIQUE") return response.status(409).json({ error: "이미 사용 중인 아이디입니다." });
+    if (error.errcode === 2067) return response.status(409).json({ error: "이미 사용 중인 아이디입니다." });
     next(error);
   }
 });
@@ -317,7 +319,7 @@ app.get("/api/users", requireAuth, (request, response) => {
 app.get("/api/conversations", requireAuth, (request, response) => {
   const conversations = database.prepare(`SELECT conversations.id, other.id AS userId,
       other.username, other.display_name AS displayName,
-      (SELECT body FROM messages WHERE conversation_id = conversations.id ORDER BY created_at DESC LIMIT 1) AS lastMessage,
+      (SELECT CASE WHEN body != '' THEN body ELSE '사진을 보냈습니다.' END FROM messages WHERE conversation_id = conversations.id ORDER BY created_at DESC LIMIT 1) AS lastMessage,
       (SELECT created_at FROM messages WHERE conversation_id = conversations.id ORDER BY created_at DESC LIMIT 1) AS lastMessageAt
     FROM conversation_members mine
     JOIN conversations ON conversations.id = mine.conversation_id
@@ -362,7 +364,7 @@ app.get("/api/conversations/:id/messages", requireAuth, (request, response) => {
   if (!statements.member.get(request.params.id, request.user.id)) return response.status(404).json({ error: "대화를 찾을 수 없습니다." });
   if (!canChatInConversation(request.params.id, request.user.id)) return response.status(403).json({ error: "서로 팔로우해야 대화를 볼 수 있습니다." });
   const messages = database.prepare(`SELECT messages.id, messages.conversation_id AS conversationId,
-      messages.sender_id AS senderId, messages.body, messages.created_at AS createdAt,
+      messages.sender_id AS senderId, messages.body, messages.image_data AS imageData, messages.created_at AS createdAt,
       users.username AS senderUsername, users.display_name AS senderDisplayName
     FROM messages JOIN users ON users.id = messages.sender_id
     WHERE messages.conversation_id = ? ORDER BY messages.created_at ASC LIMIT 500`).all(request.params.id);
@@ -455,8 +457,11 @@ io.on("connection", socket => {
   socket.on("message:send", (payload = {}, callback = () => {}) => {
     const conversationId = String(payload.conversationId || "");
     const body = String(payload.body || "").trim();
-    if (!conversationId || !body || body.length > 2000) {
-      callback({ error: "메시지는 1~2000자로 입력해주세요." });
+    const imageData = String(payload.imageData || "");
+    if (!conversationId || (!body && !imageData) || body.length > 2000
+      || imageData.length > 4_000_000
+      || (imageData && !/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(imageData))) {
+      callback({ error: "메시지는 2,000자 이하로 입력하고, 사진은 JPG·PNG·WEBP 형식으로 첨부해주세요." });
       return;
     }
     if (!statements.member.get(conversationId, socket.user.id) || !canChatInConversation(conversationId, socket.user.id)) {
@@ -470,10 +475,11 @@ io.on("connection", socket => {
       senderUsername: socket.user.username,
       senderDisplayName: socket.user.displayName,
       body,
+      imageData,
       createdAt: Date.now(),
     };
-    database.prepare("INSERT INTO messages (id, conversation_id, sender_id, body, created_at) VALUES (?, ?, ?, ?, ?)")
-      .run(message.id, conversationId, socket.user.id, body, message.createdAt);
+    database.prepare("INSERT INTO messages (id, conversation_id, sender_id, body, image_data, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(message.id, conversationId, socket.user.id, body, imageData, message.createdAt);
     io.to(`conversation:${conversationId}`).emit("message:new", message);
     callback({ message });
   });
