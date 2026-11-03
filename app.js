@@ -26,6 +26,8 @@ const state = {
   groupMode: false,
   selectedGroupUsers: new Map(),
   activeConversationId: null,
+  activeGame: null,
+  gameMenuOpen: false,
   socket: null,
   storyUserId: null,
   pendingMessageImage: "",
@@ -33,7 +35,7 @@ const state = {
 
 const app = document.getElementById("app");
 const authScreen = document.getElementById("authScreen");
-const viewIds = ["home", "reels", "explore", "notifications", "profile", "settings"];
+const viewIds = ["home", "reels", "explore", "notifications", "profile", "settings", "developer"];
 const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character]));
 const initials = name => Array.from(String(name || ""))[0] || "?";
 const formatTime = timestamp => new Intl.DateTimeFormat("ko-KR", { hour: "numeric", minute: "2-digit" }).format(new Date(timestamp));
@@ -120,6 +122,11 @@ function showApp() {
   document.getElementById("profileInitial").textContent = initials(state.user.displayName);
   document.getElementById("profileName").textContent = state.user.displayName;
   document.getElementById("sideProfileName").textContent = state.user.displayName;
+  document.getElementById("developerNav").hidden = !state.user.isDeveloper && !state.user.isAdmin;
+  document.getElementById("developerNav").title = state.user.isDeveloper ? "개발자 도구" : "관리자 도구";
+  document.getElementById("developerNav").setAttribute("aria-label", document.getElementById("developerNav").title);
+  document.getElementById("developerPageTitle").textContent = state.user.isDeveloper ? "개발자 도구" : "관리자 도구";
+  document.getElementById("developerPageSubtitle").textContent = state.user.isDeveloper ? "서비스 상태와 계정" : "계정 권한 관리";
   loadAppData();
   connectSocket();
   setView("home");
@@ -164,6 +171,11 @@ function connectSocket() {
     renderThreads();
     if (state.activeConversationId === message.conversationId) renderMessages();
   });
+  state.socket.on("game:update", game => {
+    if (game.conversationId !== state.activeConversationId) return;
+    state.activeGame = game;
+    renderMiniGame();
+  });
   state.socket.on("notification:new", notification => {
     if (state.notifications.some(item => item.id === notification.id)) return;
     state.notifications.unshift(notification);
@@ -194,7 +206,58 @@ function setView(view) {
   document.querySelectorAll(".rail-button[data-view]").forEach(button => button.classList.toggle("active", button.dataset.view === view));
   if (view === "messages") renderThreads();
   if (view === "reels") loadReels();
+  if (view === "developer") loadDeveloperDashboard();
 }
+
+async function loadDeveloperDashboard() {
+  const status = document.getElementById("developerStatus");
+  status.textContent = state.user.isDeveloper ? "개발자 권한으로 접속 중" : "관리자 권한으로 접속 중";
+  try {
+    const [overview, users] = await Promise.all([
+      state.user.isDeveloper ? api("/api/developer/overview") : Promise.resolve(null),
+      api("/api/developer/users"),
+    ]);
+    const metricsElement = document.getElementById("developerMetrics");
+    const runtimeElement = document.getElementById("developerRuntime");
+    metricsElement.hidden = !overview;
+    runtimeElement.hidden = !overview;
+    if (overview) {
+      const metrics = [
+        ["계정", overview.users], ["활성 세션", overview.sessions], ["게시물", overview.posts],
+        ["활성 스토리", overview.stories], ["릴스", overview.reels], ["대화", overview.conversations],
+        ["그룹 채팅", overview.groups], ["게임 세션", overview.games],
+      ];
+      metricsElement.innerHTML = metrics.map(([label, value]) => `<div class="developer-metric"><span>${label}</span><strong>${Number(value).toLocaleString("ko-KR")}</strong></div>`).join("");
+      runtimeElement.textContent = `Node ${overview.nodeVersion} · 서버 가동 ${Math.floor(overview.uptimeSeconds / 60)}분`;
+    } else {
+    }
+    document.getElementById("developerUsers").innerHTML = users.users.length ? users.users.map(user => {
+      const roles = state.user.isDeveloper ? ["user", "admin", "developer"] : ["user", "admin"];
+      const roleOptions = roles.map(role => `<option value="${role}" ${user.role === role ? "selected" : ""}>${role === "developer" ? "개발자" : role === "admin" ? "관리자" : "사용자"}</option>`).join("");
+      const disabled = user.id === state.user.id ? "disabled" : "";
+      return `<tr><td>@${escapeHtml(user.username)}</td><td>${escapeHtml(user.displayName)}</td><td><select class="role-select" data-user-role="${escapeHtml(user.id)}" data-current-role="${escapeHtml(user.role)}" ${disabled}>${roleOptions}</select></td><td>${user.posts}</td><td>${user.activeStories}</td></tr>`;
+    }).join("") : `<tr><td colspan="5">계정이 없습니다.</td></tr>`;
+  } catch (error) {
+    status.textContent = error.message;
+    document.getElementById("developerMetrics").innerHTML = "";
+    document.getElementById("developerUsers").innerHTML = "";
+  }
+}
+
+document.getElementById("developerUsers").addEventListener("change", async event => {
+  const selector = event.target.closest("[data-user-role]");
+  if (!selector) return;
+  try {
+    await api(`/api/developer/users/${encodeURIComponent(selector.dataset.userRole)}/role`, {
+      method: "PATCH",
+      body: JSON.stringify({ role: selector.value }),
+    });
+    await loadDeveloperDashboard();
+  } catch (error) {
+    alert(error.message);
+    selector.value = selector.dataset.currentRole;
+  }
+});
 
 function renderStories() {
   const groupedStories = new Map();
@@ -383,7 +446,7 @@ function renderReels() {
 
 function renderReel(reel) {
   const creator = reel.source === "youtube" ? reel.creatorDisplayName : `@${reel.creatorUsername}`;
-  return `<article class="reel-card" data-reel-card="${escapeHtml(reel.id)}"><div class="reel-player" id="reel-player-${escapeHtml(reel.id)}" data-youtube-id="${escapeHtml(reel.youtubeId)}" aria-label="${escapeHtml(reel.caption)}"></div><div class="reel-shade"></div><div class="reel-copy"><span class="reel-reason">${escapeHtml(reel.recommendationReason)}</span><strong>${escapeHtml(creator)}</strong><p>${escapeHtml(reel.caption)}</p><a href="https://www.youtube.com/shorts/${encodeURIComponent(reel.youtubeId)}" target="_blank" rel="noopener noreferrer">YouTube에서 열기</a></div><div class="reel-actions"><button class="reel-like ${reel.liked ? "liked" : ""}" type="button" data-reel-like="${escapeHtml(reel.id)}" aria-label="좋아요" aria-pressed="${Boolean(reel.liked)}"><svg viewBox="0 0 24 24"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8l1.1 1.1L12 21l7.8-7.5 1.1-1.1a5.5 5.5 0 0 0-.1-7.8z"/></svg><span>${reel.likes}</span></button><span class="reel-signal" title="내 시청 기록">${reel.completed ? "완주" : reel.watchMs ? "시청" : ""}</span></div></article>`;
+  return `<article class="reel-card" data-reel-card="${escapeHtml(reel.id)}"><div class="reel-player" id="reel-player-${escapeHtml(reel.id)}" data-youtube-id="${escapeHtml(reel.youtubeId)}" aria-label="${escapeHtml(reel.caption)}"></div><div class="reel-shade"></div><div class="reel-copy"><span class="reel-reason">${escapeHtml(reel.recommendationReason)}</span><strong>${escapeHtml(creator)}</strong><p>${escapeHtml(reel.caption)}</p><a href="https://www.youtube.com/shorts/${encodeURIComponent(reel.youtubeId)}" target="_blank" rel="noopener noreferrer">YouTube에서 열기</a></div><div class="reel-actions"><button class="reel-like ${reel.liked ? "liked" : ""}" type="button" data-reel-like="${escapeHtml(reel.id)}" aria-label="좋아요" aria-pressed="${Boolean(reel.liked)}"><svg viewBox="0 0 24 24"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8l1.1 1.1L12 21l7.8-7.5 1.1-1.1a5.5 5.5 0 0 0-.1-7.8z"/></svg><span>${reel.likes}</span></button><button class="reel-fullscreen" type="button" data-reel-fullscreen="${escapeHtml(reel.id)}" aria-label="전체 화면으로 보기" title="전체 화면"><svg viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5"/></svg></button><span class="reel-signal" title="내 시청 기록">${reel.completed ? "완주" : reel.watchMs ? "시청" : ""}</span></div></article>`;
 }
 
 async function loadMoreReels() {
@@ -467,7 +530,7 @@ async function activateReel(reelId) {
     if (!element || state.activeReelId !== reelId) return;
     const player = new youtube.Player(element, {
       videoId: element.dataset.youtubeId,
-      playerVars: { autoplay: 1, controls: 1, playsinline: 1, rel: 0, origin: window.location.origin },
+      playerVars: { autoplay: 1, controls: 1, fs: 1, playsinline: 1, rel: 0, origin: window.location.origin },
       events: {
         onReady: event => {
           if (state.activeReelId === reelId) {
@@ -577,6 +640,8 @@ function joinConversation(id) {
 
 async function openConversation(id) {
   state.activeConversationId = id;
+  state.activeGame = null;
+  renderMiniGame();
   app.dataset.view = "messages";
   setView("messages");
   const conversation = state.conversations.find(item => item.id === id);
@@ -590,10 +655,74 @@ async function openConversation(id) {
     state.messages.set(id, result.messages);
     joinConversation(id);
     renderMessages();
+    const gameResult = await api(`/api/conversations/${encodeURIComponent(id)}/game`);
+    state.activeGame = gameResult.game;
+    document.getElementById("gamePlus").hidden = !conversation?.groupName;
+    document.getElementById("miniGameMenu").hidden = true;
+    renderMiniGame();
     document.getElementById("messageInput").focus();
   } catch (error) {
     alert(error.message);
   }
+}
+
+function renderMiniGame() {
+  const panel = document.getElementById("miniGamePanel");
+  const game = state.activeGame;
+  if (!game || game.conversationId !== state.activeConversationId) {
+    panel.hidden = true;
+    panel.innerHTML = "";
+    return;
+  }
+  const currentPlayer = game.players.find(player => player.id === game.currentPlayerId);
+  const isMyTurn = game.status === "active" && game.currentPlayerId === state.user.id;
+  const title = game.gameType === "baseball" ? "숫자야구" : "승부차기";
+  const playerLine = game.status === "active"
+    ? `${escapeHtml(currentPlayer?.displayName || "참여자")} 차례`
+    : escapeHtml(game.result);
+  const close = `<button class="mini-game-close" type="button" data-close-game aria-label="게임 닫기">접기</button>`;
+  let content = "";
+  if (game.gameType === "baseball") {
+    const guesses = game.guesses.map(guess => `<div class="game-history-row"><strong>${escapeHtml(guess.displayName)}</strong><span>${escapeHtml(guess.guess)}</span><span>${guess.strikes}S ${guess.balls}B</span></div>`).join("");
+    const guessForm = isMyTurn ? `<form class="baseball-guess-form" id="baseballGuessForm"><input name="guess" inputmode="numeric" pattern="[0-9]{3}" maxlength="3" placeholder="서로 다른 숫자 3개" aria-label="숫자야구 추측" required><button class="primary-button" type="submit">추측</button></form>` : "";
+    content = `<p class="mini-game-instruction">0~9 중 서로 다른 숫자 3개를 맞혀보세요.</p><div class="game-history">${guesses || `<p class="mini-game-wait">첫 숫자를 입력해보세요.</p>`}</div>${guessForm}`;
+  } else {
+    const shots = game.shots.slice(-8).map(shot => `<div class="game-history-row"><strong>${escapeHtml(shot.displayName)}</strong><span>${shot.round}R</span><span>${shot.goal ? "골!" : "선방"}</span></div>`).join("");
+    const directions = [["left", "왼쪽"], ["center", "가운데"], ["right", "오른쪽"]];
+    const shotButtons = isMyTurn ? `<div class="soccer-directions">${directions.map(([direction, label]) => `<button class="soccer-direction" type="button" data-soccer-direction="${direction}">${label}</button>`).join("")}</div>` : "";
+    content = `<p class="mini-game-instruction">${game.round}/${game.totalRounds} 라운드 · 그룹 득점 ${game.goals}골</p><div class="game-history">${shots || `<p class="mini-game-wait">첫 슛을 차보세요.</p>`}</div>${shotButtons}`;
+  }
+  panel.innerHTML = `<section class="mini-game-card"><header class="mini-game-header"><div><strong>${title}</strong><span>${playerLine}</span></div>${close}</header>${content}</section>`;
+  panel.hidden = false;
+}
+
+function sendMiniGameAction(action) {
+  if (!state.socket?.connected || !state.activeConversationId) return;
+  state.socket.emit("game:action", { conversationId: state.activeConversationId, ...action }, result => {
+    if (result?.error) {
+      alert(result.error);
+      if (result.game) {
+        state.activeGame = result.game;
+        renderMiniGame();
+      }
+      return;
+    }
+    state.activeGame = result.game;
+    renderMiniGame();
+  });
+}
+
+function startMiniGame(gameType) {
+  if (!state.socket?.connected || !state.activeConversationId) return;
+  state.socket.emit("game:create", { conversationId: state.activeConversationId, gameType }, result => {
+    if (result?.error) {
+      alert(result.error);
+      if (result.game) state.activeGame = result.game;
+    } else state.activeGame = result.game;
+    state.gameMenuOpen = false;
+    document.getElementById("miniGameMenu").hidden = true;
+    renderMiniGame();
+  });
 }
 
 function compressImage(file) {
@@ -786,6 +915,17 @@ document.getElementById("newChatForm").addEventListener("submit", async event =>
 document.getElementById("cancelNewChat").addEventListener("click", () => document.getElementById("newChatDialog").close());
 
 document.addEventListener("click", async event => {
+  const fullscreenButton = event.target.closest("[data-reel-fullscreen]");
+  if (fullscreenButton) {
+    const card = fullscreenButton.closest(".reel-card");
+    try {
+      if (document.fullscreenElement === card) await document.exitFullscreen();
+      else if (card?.requestFullscreen) await card.requestFullscreen();
+      else await state.reelPlayers.get(fullscreenButton.dataset.reelFullscreen)?.getIframe()?.requestFullscreen();
+    } catch {
+      alert("전체 화면을 사용할 수 없습니다. 영상 플레이어의 전체 화면 버튼을 이용해주세요.");
+    }
+  }
   const storyAdd = event.target.closest("[data-story-add]");
   if (storyAdd) document.getElementById("storyUpload").click();
   const storyUser = event.target.closest("[data-story-user]");
@@ -930,6 +1070,24 @@ document.getElementById("messageForm").addEventListener("submit", event => {
     document.getElementById("messageImagePreviewImage").removeAttribute("src");
     input.focus();
   });
+});
+document.getElementById("gamePlus").addEventListener("click", () => {
+  state.gameMenuOpen = !state.gameMenuOpen;
+  document.getElementById("miniGameMenu").hidden = !state.gameMenuOpen;
+});
+document.querySelectorAll("[data-start-game]").forEach(button => button.addEventListener("click", () => startMiniGame(button.dataset.startGame)));
+document.getElementById("miniGamePanel").addEventListener("submit", event => {
+  if (event.target.id !== "baseballGuessForm") return;
+  event.preventDefault();
+  const guess = event.target.elements.guess.value.trim();
+  sendMiniGameAction({ guess });
+});
+document.getElementById("miniGamePanel").addEventListener("click", event => {
+  const shotButton = event.target.closest("[data-soccer-direction]");
+  if (shotButton) sendMiniGameAction({ direction: shotButton.dataset.soccerDirection });
+  if (event.target.closest("[data-close-game]")) {
+    document.getElementById("miniGamePanel").hidden = true;
+  }
 });
 document.getElementById("attachMessage").addEventListener("click", () => document.getElementById("messageImage").click());
 document.getElementById("messageImage").addEventListener("change", async event => {

@@ -5,7 +5,8 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env server.js",
     "dev": "node --env-file-if-exists=.env --watch server.js",
-    "reset-password": "node --env-file-if-exists=.env reset-password.js"
+    "reset-password": "node --env-file-if-exists=.env reset-password.js",
+    "grant-developer": "node --env-file-if-exists=.env grant-developer.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

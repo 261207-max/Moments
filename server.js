@@ -28,6 +28,11 @@ database.exec(`
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     expires_at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS account_roles (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('user', 'admin')),
+    updated_at INTEGER NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     created_at INTEGER NOT NULL,
@@ -38,6 +43,18 @@ database.exec(`
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     PRIMARY KEY (conversation_id, user_id)
   );
+  CREATE TABLE IF NOT EXISTS mini_games (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    game_type TEXT NOT NULL CHECK (game_type IN ('baseball', 'soccer')),
+    state_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'complete')),
+    created_by TEXT NOT NULL REFERENCES users(id),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS mini_games_one_active_per_conversation
+    ON mini_games(conversation_id) WHERE status = 'active';
   CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
     conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -147,22 +164,26 @@ database.exec(`
 const userColumns = new Set(database.prepare("PRAGMA table_info(users)").all().map(column => column.name));
 if (!userColumns.has("email")) database.exec("ALTER TABLE users ADD COLUMN email TEXT");
 if (!userColumns.has("google_sub")) database.exec("ALTER TABLE users ADD COLUMN google_sub TEXT");
+if (!userColumns.has("role")) database.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'developer'))");
 const messageColumns = new Set(database.prepare("PRAGMA table_info(messages)").all().map(column => column.name));
 if (!messageColumns.has("image_data")) database.exec("ALTER TABLE messages ADD COLUMN image_data TEXT NOT NULL DEFAULT ''");
 const conversationColumns = new Set(database.prepare("PRAGMA table_info(conversations)").all().map(column => column.name));
 if (!conversationColumns.has("group_name")) database.exec("ALTER TABLE conversations ADD COLUMN group_name TEXT");
-database.exec("CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users(email) WHERE email IS NOT NULL; CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub_unique ON users(google_sub) WHERE google_sub IS NOT NULL;");
+database.exec("CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users(email) WHERE email IS NOT NULL; CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub_unique ON users(google_sub) WHERE google_sub IS NOT NULL; CREATE UNIQUE INDEX IF NOT EXISTS users_single_developer ON users(role) WHERE role = 'developer';");
 
 app.disable("x-powered-by");
 app.use(express.json({ limit: "10mb" }));
 
 const statements = {
-  userById: database.prepare("SELECT id, username, display_name AS displayName FROM users WHERE id = ?"),
+  userById: database.prepare("SELECT id, username, display_name AS displayName, role FROM users WHERE id = ?"),
   userByUsername: database.prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE"),
   userByEmail: database.prepare("SELECT * FROM users WHERE email = ? COLLATE NOCASE"),
   userByGoogleSub: database.prepare("SELECT * FROM users WHERE google_sub = ?"),
-  sessionUser: database.prepare(`SELECT users.id, users.username, users.display_name AS displayName
+  sessionUser: database.prepare(`SELECT users.id, users.username, users.display_name AS displayName,
+      CASE WHEN users.role = 'developer' THEN 'developer'
+        ELSE COALESCE(account_roles.role, 'user') END AS role
     FROM sessions JOIN users ON users.id = sessions.user_id
+    LEFT JOIN account_roles ON account_roles.user_id = users.id
     WHERE sessions.token_hash = ? AND sessions.expires_at > ?`),
   member: database.prepare("SELECT 1 FROM conversation_members WHERE conversation_id = ? AND user_id = ?"),
 };
@@ -197,13 +218,37 @@ function requireAuth(request, response, next) {
 }
 
 function publicUser(user) {
-  return { id: user.id, username: user.username, displayName: user.displayName };
+  const accountRole = user.role === "developer"
+    ? "developer"
+    : database.prepare("SELECT role FROM account_roles WHERE user_id = ?").get(user.id)?.role || "user";
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    role: accountRole,
+    isAdmin: accountRole === "admin",
+    isDeveloper: accountRole === "developer",
+  };
 }
 
 function areMutualFollowers(userId, otherUserId) {
   return Boolean(database.prepare(`SELECT 1 FROM follows mine
     JOIN follows theirs ON theirs.follower_id = mine.followed_id AND theirs.followed_id = mine.follower_id
     WHERE mine.follower_id = ? AND mine.followed_id = ?`).get(userId, otherUserId));
+}
+
+function requireDeveloper(request, response, next) {
+  if (!request.user || request.user.role !== "developer") {
+    return response.status(403).json({ error: "개발자 권한이 필요합니다." });
+  }
+  next();
+}
+
+function requireAdmin(request, response, next) {
+  if (!request.user || !["admin", "developer"].includes(request.user.role)) {
+    return response.status(403).json({ error: "관리자 권한이 필요합니다." });
+  }
+  next();
 }
 
 function canChatInConversation(conversationId, userId) {
@@ -213,6 +258,49 @@ function canChatInConversation(conversationId, userId) {
   if (members.length > 2) return true;
   const otherMember = members.find(member => member.userId !== userId);
   return Boolean(otherMember && areMutualFollowers(userId, otherMember.userId));
+}
+
+function getGroupMembers(conversationId) {
+  return database.prepare(`SELECT users.id, users.username, users.display_name AS displayName
+    FROM conversation_members JOIN users ON users.id = conversation_members.user_id
+    WHERE conversation_members.conversation_id = ? ORDER BY conversation_members.rowid`).all(conversationId);
+}
+
+function getMiniGame(conversationId) {
+  return database.prepare(`SELECT id, conversation_id AS conversationId, game_type AS gameType,
+      state_json AS stateJson, status, created_at AS createdAt, updated_at AS updatedAt
+    FROM mini_games WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1`).get(conversationId);
+}
+
+function publicMiniGame(record) {
+  if (!record) return null;
+  const game = JSON.parse(record.stateJson);
+  const currentPlayer = game.status === "active" ? game.players[game.turnIndex] : null;
+  return {
+    id: record.id,
+    conversationId: record.conversationId,
+    gameType: record.gameType,
+    status: game.status,
+    players: game.players,
+    currentPlayerId: currentPlayer?.id || null,
+    guesses: game.guesses || [],
+    shots: game.shots || [],
+    goals: game.goals || 0,
+    round: game.round || null,
+    totalRounds: game.totalRounds || null,
+    winnerId: game.winnerId || null,
+    result: game.result || "",
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+function isGroupConversation(conversationId) {
+  const conversation = database.prepare(`SELECT conversations.group_name AS groupName,
+      COUNT(conversation_members.user_id) AS memberCount
+    FROM conversations JOIN conversation_members ON conversation_members.conversation_id = conversations.id
+    WHERE conversations.id = ? GROUP BY conversations.id`).get(conversationId);
+  return Boolean(conversation?.groupName && conversation.memberCount >= 3);
 }
 
 function youtubeVideoId(value) {
@@ -271,6 +359,82 @@ app.get("/api/config", (request, response) => {
   response.json({ googleClientId: process.env.GOOGLE_CLIENT_ID || "" });
 });
 
+app.get("/api/developer/overview", requireAuth, requireDeveloper, (request, response) => {
+  const count = table => database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count;
+  response.setHeader("Cache-Control", "no-store");
+  response.json({
+    nodeVersion: process.version,
+    uptimeSeconds: Math.floor(process.uptime()),
+    users: count("users"),
+    sessions: database.prepare("SELECT COUNT(*) AS count FROM sessions WHERE expires_at > ?").get(Date.now()).count,
+    posts: count("posts"),
+    stories: database.prepare("SELECT COUNT(*) AS count FROM stories WHERE expires_at > ?").get(Date.now()).count,
+    reels: count("reels"),
+    conversations: count("conversations"),
+    groups: database.prepare("SELECT COUNT(*) AS count FROM conversations WHERE group_name IS NOT NULL").get().count,
+    games: count("mini_games"),
+  });
+});
+
+app.get("/api/developer/users", requireAuth, requireAdmin, (request, response) => {
+  const users = database.prepare(`SELECT users.id, users.username, users.display_name AS displayName,
+      CASE WHEN users.role = 'developer' THEN 'developer' ELSE COALESCE(account_roles.role, 'user') END AS role,
+      users.created_at AS createdAt,
+      (SELECT COUNT(*) FROM posts WHERE user_id = users.id) AS posts,
+      (SELECT COUNT(*) FROM stories WHERE user_id = users.id AND expires_at > ?) AS activeStories
+    FROM users LEFT JOIN account_roles ON account_roles.user_id = users.id
+    ORDER BY users.created_at DESC LIMIT 100`).all(Date.now());
+  response.setHeader("Cache-Control", "no-store");
+  response.json({ users });
+});
+
+app.patch("/api/developer/users/:id/role", requireAuth, requireAdmin, (request, response) => {
+  const userId = request.params.id;
+  const role = String(request.body.role || "");
+  if (!["user", "admin", "developer"].includes(role)) {
+    return response.status(400).json({ error: "사용자, 관리자, 개발자 중 권한을 선택해주세요." });
+  }
+  const target = statements.userById.get(userId);
+  if (!target) return response.status(404).json({ error: "계정을 찾을 수 없습니다." });
+  const currentRole = publicUser(target).role;
+  if (target.id === request.user.id && role !== currentRole) {
+    return response.status(400).json({ error: "현재 로그인한 계정의 권한은 여기서 변경할 수 없습니다." });
+  }
+  if (role === "developer" && request.user.role !== "developer") {
+    return response.status(403).json({ error: "개발자 권한 부여는 개발자 계정만 할 수 있습니다." });
+  }
+  if (currentRole === "developer" && request.user.role !== "developer") {
+    return response.status(403).json({ error: "개발자 권한은 개발자 계정만 변경할 수 있습니다." });
+  }
+  const currentDeveloper = database.prepare("SELECT id FROM users WHERE role = 'developer'").get();
+  if (role === "developer" && currentDeveloper && currentDeveloper.id !== target.id) {
+    return response.status(409).json({ error: "개발자 계정은 하나만 지정할 수 있습니다." });
+  }
+
+  database.exec("BEGIN");
+  try {
+    if (role === "developer") {
+      database.prepare("DELETE FROM account_roles WHERE user_id = ?").run(target.id);
+      database.prepare("UPDATE users SET role = 'developer' WHERE id = ?").run(target.id);
+    } else {
+      database.prepare("UPDATE users SET role = 'user' WHERE id = ?").run(target.id);
+      if (role === "admin") {
+        database.prepare(`INSERT INTO account_roles (user_id, role, updated_at) VALUES (?, 'admin', ?)
+          ON CONFLICT(user_id) DO UPDATE SET role = 'admin', updated_at = excluded.updated_at`)
+          .run(target.id, Date.now());
+      } else {
+        database.prepare("DELETE FROM account_roles WHERE user_id = ?").run(target.id);
+      }
+    }
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    if (error.errcode === 2067) return response.status(409).json({ error: "개발자 계정은 하나만 지정할 수 있습니다." });
+    throw error;
+  }
+  response.json({ user: publicUser(statements.userById.get(target.id)) });
+});
+
 app.post("/api/auth/google", async (request, response) => {
   const clientId = process.env.GOOGLE_CLIENT_ID;
   const credential = String(request.body.credential || "");
@@ -327,7 +491,7 @@ app.post("/api/auth/register", async (request, response, next) => {
     database.prepare("INSERT INTO users (id, username, display_name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(user.id, user.username, user.displayName, passwordHash, Date.now());
     createSession(user.id, response);
-    response.status(201).json({ user });
+    response.status(201).json({ user: publicUser({ ...user, role: "user" }) });
   } catch (error) {
     if (error.errcode === 2067) return response.status(409).json({ error: "이미 사용 중인 아이디입니다." });
     next(error);
@@ -356,7 +520,7 @@ app.post("/api/auth/logout", (request, response) => {
   response.json({ ok: true });
 });
 
-app.get("/api/me", requireAuth, (request, response) => response.json({ user: request.user }));
+app.get("/api/me", requireAuth, (request, response) => response.json({ user: publicUser(request.user) }));
 
 app.patch("/api/me", requireAuth, (request, response) => {
   const displayName = String(request.body.displayName || "").trim();
@@ -480,6 +644,12 @@ app.post("/api/conversations/group", requireAuth, (request, response) => {
     throw error;
   }
   response.status(201).json({ conversation: { id, groupName, displayName: groupName, memberCount: userIds.length + 1 } });
+});
+
+app.get("/api/conversations/:id/game", requireAuth, (request, response) => {
+  if (!statements.member.get(request.params.id, request.user.id)) return response.status(404).json({ error: "대화를 찾을 수 없습니다." });
+  if (!canChatInConversation(request.params.id, request.user.id)) return response.status(403).json({ error: "대화에 참여할 수 없습니다." });
+  response.json({ game: isGroupConversation(request.params.id) ? publicMiniGame(getMiniGame(request.params.id)) : null });
 });
 
 app.get("/api/stories", requireAuth, (request, response) => {
@@ -834,6 +1004,129 @@ io.on("connection", socket => {
     }
     socket.join(`conversation:${conversationId}`);
     callback({ ok: true });
+  });
+
+  socket.on("game:create", (payload = {}, callback = () => {}) => {
+    const conversationId = String(payload.conversationId || "");
+    const gameType = String(payload.gameType || "");
+    if (!statements.member.get(conversationId, socket.user.id) || !canChatInConversation(conversationId, socket.user.id)) {
+      callback({ error: "대화에 참여할 수 없습니다." });
+      return;
+    }
+    if (!isGroupConversation(conversationId)) {
+      callback({ error: "미니게임은 단체 대화에서만 시작할 수 있습니다." });
+      return;
+    }
+    if (!["baseball", "soccer"].includes(gameType)) {
+      callback({ error: "미니게임 종류를 확인해주세요." });
+      return;
+    }
+    const currentGame = database.prepare("SELECT id, conversation_id AS conversationId, game_type AS gameType, state_json AS stateJson, status, created_at AS createdAt, updated_at AS updatedAt FROM mini_games WHERE conversation_id = ? AND status = 'active'")
+      .get(conversationId);
+    if (currentGame) {
+      callback({ error: "이미 진행 중인 게임이 있습니다.", game: publicMiniGame(currentGame) });
+      return;
+    }
+    const players = getGroupMembers(conversationId);
+    const now = Date.now();
+    const digits = Array.from({ length: 10 }, (_, digit) => String(digit));
+    for (let digitIndex = digits.length - 1; digitIndex > 0; digitIndex--) {
+      const swapIndex = crypto.randomInt(digitIndex + 1);
+      [digits[digitIndex], digits[swapIndex]] = [digits[swapIndex], digits[digitIndex]];
+    }
+    const state = gameType === "baseball"
+      ? { status: "active", players, turnIndex: 0, secret: digits.slice(0, 3).join(""), guesses: [], winnerId: null, result: "" }
+      : { status: "active", players, turnIndex: 0, round: 1, totalRounds: 5, goals: 0, shots: [], winnerId: null, result: "" };
+    const id = crypto.randomUUID();
+    try {
+      database.prepare("INSERT INTO mini_games (id, conversation_id, game_type, state_json, status, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)")
+        .run(id, conversationId, gameType, JSON.stringify(state), socket.user.id, now, now);
+    } catch (error) {
+      if (error.errcode === 2067) {
+        callback({ error: "이미 진행 중인 게임이 있습니다." });
+        return;
+      }
+      callback({ error: "게임을 시작하지 못했습니다." });
+      return;
+    }
+    const record = { id, conversationId, gameType, stateJson: JSON.stringify(state), status: "active", createdAt: now, updatedAt: now };
+    const game = publicMiniGame(record);
+    io.to(`conversation:${conversationId}`).emit("game:update", game);
+    callback({ game });
+  });
+
+  socket.on("game:action", (payload = {}, callback = () => {}) => {
+    const conversationId = String(payload.conversationId || "");
+    if (!statements.member.get(conversationId, socket.user.id) || !canChatInConversation(conversationId, socket.user.id)
+      || !isGroupConversation(conversationId)) {
+      callback({ error: "단체 대화 참여자만 게임을 할 수 있습니다." });
+      return;
+    }
+    const record = database.prepare(`SELECT id, conversation_id AS conversationId, game_type AS gameType,
+        state_json AS stateJson, status, created_at AS createdAt, updated_at AS updatedAt
+      FROM mini_games WHERE conversation_id = ? AND status = 'active'`).get(conversationId);
+    if (!record) {
+      callback({ error: "진행 중인 게임이 없습니다." });
+      return;
+    }
+    const game = JSON.parse(record.stateJson);
+    const currentPlayer = game.players[game.turnIndex];
+    if (currentPlayer?.id !== socket.user.id) {
+      callback({ error: "아직 내 차례가 아닙니다." });
+      return;
+    }
+    if (record.gameType === "baseball") {
+      const guess = String(payload.guess || "");
+      if (!/^[0-9]{3}$/.test(guess) || new Set(guess).size !== 3) {
+        callback({ error: "서로 다른 숫자 3개를 입력해주세요." });
+        return;
+      }
+      const strikes = [...guess].filter((digit, index) => digit === game.secret[index]).length;
+      const balls = [...guess].filter((digit, index) => digit !== game.secret[index] && game.secret.includes(digit)).length;
+      game.guesses.push({ userId: socket.user.id, displayName: socket.user.displayName, guess, strikes, balls });
+      if (strikes === 3) {
+        game.status = "complete";
+        game.winnerId = socket.user.id;
+        game.result = `${socket.user.displayName}님이 정답을 맞혔습니다!`;
+      } else if (game.guesses.length >= 10) {
+        game.status = "complete";
+        game.result = `10번 안에 맞히지 못했습니다. 정답은 ${game.secret}입니다.`;
+      } else {
+        game.turnIndex = (game.turnIndex + 1) % game.players.length;
+      }
+    } else if (record.gameType === "soccer") {
+      const direction = String(payload.direction || "");
+      const directions = ["left", "center", "right"];
+      if (!directions.includes(direction)) {
+        callback({ error: "슛 방향을 선택해주세요." });
+        return;
+      }
+      const keeperDirection = directions[crypto.randomInt(0, directions.length)];
+      const goal = direction !== keeperDirection;
+      game.shots.push({ userId: socket.user.id, displayName: socket.user.displayName, direction, keeperDirection, goal, round: game.round });
+      if (goal) game.goals += 1;
+      if (game.turnIndex + 1 >= game.players.length) {
+        if (game.round >= game.totalRounds) {
+          game.status = "complete";
+          game.result = `${game.totalRounds}라운드 종료! 그룹이 ${game.goals}골을 넣었습니다.`;
+        } else {
+          game.round += 1;
+          game.turnIndex = 0;
+        }
+      } else {
+        game.turnIndex += 1;
+      }
+    } else {
+      callback({ error: "게임 상태를 확인해주세요." });
+      return;
+    }
+    const updatedAt = Date.now();
+    database.prepare("UPDATE mini_games SET state_json = ?, status = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(game), game.status, updatedAt, record.id);
+    const updatedRecord = { ...record, stateJson: JSON.stringify(game), status: game.status, updatedAt };
+    const publicGame = publicMiniGame(updatedRecord);
+    io.to(`conversation:${conversationId}`).emit("game:update", publicGame);
+    callback({ game: publicGame });
   });
 
   socket.on("message:send", (payload = {}, callback = () => {}) => {
